@@ -1,0 +1,160 @@
+// =============================================================================
+// Pathfinding Library for HVM4
+// Shared graph/list utilities. #include this file from test files.
+// Filename starts with _ so the test runner skips it.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Booleans and control flow
+// -----------------------------------------------------------------------------
+
+@T = 1
+@F = 0
+
+// if(cond, then, else): branch on 0/1
+@if = λc. λt. λf. λ{0: f; λn. t}(c)
+
+// not: flip 0 to 1 and nonzero to 0
+@not = λ{0: 1; λn. 0}
+
+// and(a, b): short-circuit logical AND on 0/1
+@and = λ&a. λb. λ{0: 0; λn. b}(a)
+
+// or(a, b): short-circuit logical OR on 0/1
+@or = λ&a. λ&b. λ{0: b; λn. a}(a)
+
+// -----------------------------------------------------------------------------
+// Min / Max / Infinity
+// -----------------------------------------------------------------------------
+
+@INF = 999999
+
+// min(a, b): return the smaller of two numbers
+@min = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+// max(a, b): return the larger of two numbers
+@max = λ&a. λ&b. λ{0: b; λn. a}(a > b)
+
+// -----------------------------------------------------------------------------
+// List operations
+// -----------------------------------------------------------------------------
+
+// len(xs): length of a list
+@len = λ{[]: 0; <>: λh. λt. 1 + @len(t)}
+
+// append(xs, ys): concatenate two lists
+@append = λxs. λ&ys. λ{[]: ys; <>: λh. λt. h <> @append(t, ys)}(xs)
+
+// reverse(xs): reverse a list using foldl with cons
+@reverse = λxs. @foldl(λacc. λx. x <> acc, [], xs)
+
+// map(f, xs): apply f to each element (f is cloned for each element)
+@map = λ&f. λ{[]: []; <>: λh. λt. f(h) <> @map(f, t)}
+
+// filter(pred, xs): keep elements where pred returns nonzero
+@filter = λ&pred. λ{[]: []; <>: λ&h. λ&t. λ{0: @filter(pred, t); λn. h <> @filter(pred, t)}(pred(h))}
+
+// foldl(f, acc, xs): left fold (f and acc cloned for threading)
+@foldl = λ&f. λ&acc. λ{[]: acc; <>: λh. λt. @foldl(f, f(acc, h), t)}
+
+// foldr(f, z, xs): right fold (f cloned for each element)
+@foldr = λ&f. λ&z. λ{[]: z; <>: λh. λt. f(h, @foldr(f, z, t))}
+
+// member(x, xs): check if x is in list (returns 0 or 1)
+@member = λ&x. λ{[]: 0; <>: λ&h. λt. λ{0: @member(x, t); λn. 1}(h == x)}
+
+// nth(n, xs): get the nth element (0-indexed), returns 0 as default
+@nth = λ&n. λ{[]: 0; <>: λ&h. λt. λ{0: h; λm. @nth(n - 1, t)}(n)}
+
+// range(n): generate list [0, 1, ..., n-1]
+@range = λn. @range_go(0, n)
+@range_go = λ&i. λ&n. λ{0: []; λm. i <> @range_go(i + 1, n - 1)}(n)
+
+// zip_with(f, xs, ys): zip two lists with a function
+@zip_with = λ&f. λxs. λys. λ{[]: []; <>: λhx. λtx. λ{[]: []; <>: λhy. λty. f(hx, hy) <> @zip_with(f, tx, ty)}(ys)}(xs)
+
+// -----------------------------------------------------------------------------
+// Search helpers
+// -----------------------------------------------------------------------------
+
+// find(pred, default, xs): first element matching pred, or default
+@find = λ&pred. λ&def. λ{[]: def; <>: λ&h. λt. λ{0: @find(pred, def, t); λn. h}(pred(h))}
+
+// min_by(key, xs): find element with minimum key value
+// Returns the element (not the key). For empty list returns 0.
+@min_by = λ&key. λ{
+  []: 0;
+  <>: λ&h. λt. @min_by_go(key, h, key(h), t)
+}
+
+@min_by_go = λ&key. λ&best. λ&best_k. λ{
+  []: best;
+  <>: λ&h. λ&t.
+    ! &hk = key(h);
+    λ{0: @min_by_go(key, best, best_k, t);
+       λn. @min_by_go(key, h, hk, t)
+    }(hk < best_k)
+}
+
+// -----------------------------------------------------------------------------
+// Graph representation
+// #N{id, edges}  = graph node with an id and a list of edges
+// #E{target, weight} = directed edge with target node id and weight
+// -----------------------------------------------------------------------------
+
+// get_node(id, graph): find a node by id in a list of #N nodes
+// Returns #N{id, edges} or #N{id, []} if not found
+@get_node = λ&id. λ{
+  []: #N{id, []};
+  <>: λ&h. λt. λ{
+    #N: λ&nid. λedges. λ{0: @get_node(id, t); λn. #N{nid, edges}}(nid == id)
+  }(h)
+}
+
+// get_neighbors(id, graph): get the edge list for a node id
+@get_neighbors = λ&id. λgraph.
+  ! &node = @get_node(id, graph);
+  λ{#N: λnid. λedges. edges}(node)
+
+// get_edge_weight(target, edges): get weight of edge to target from edge list
+// Returns INF if not found
+@get_edge_weight = λ&target. λ{
+  []: @INF;
+  <>: λ&h. λt. λ{
+    #E: λ&eid. λw. λ{0: @get_edge_weight(target, t); λn. w}(eid == target)
+  }(h)
+}
+
+// -----------------------------------------------------------------------------
+// Association list (list of #KV{key, value} pairs)
+// -----------------------------------------------------------------------------
+
+// assoc_get(key, default, alist): get value for key, or default
+@assoc_get = λ&key. λ&def. λ{
+  []: def;
+  <>: λ&h. λt. λ{
+    #KV: λ&k. λv. λ{0: @assoc_get(key, def, t); λn. v}(k == key)
+  }(h)
+}
+
+// assoc_set(key, value, alist): set/update value for key
+// If key exists, replaces value. Otherwise prepends.
+@assoc_set = λ&key. λ&val. λalist. @assoc_set_go(key, val, alist, 0)
+
+@assoc_set_go = λ&key. λ&val. λ&alist. λ&found. λ{
+  []: λ{0: [#KV{key, val}]; λn. []}(found);
+  <>: λ&h. λ&t. λ{
+    #KV: λ&k. λ&v. λ{
+      0: #KV{k, v} <> @assoc_set_go(key, val, t, found);
+      λn. #KV{k, val} <> @assoc_set_go(key, val, t, 1)
+    }(k == key)
+  }(h)
+}(alist)
+
+// assoc_has(key, alist): check if key exists (returns 0 or 1)
+@assoc_has = λ&key. λ{
+  []: 0;
+  <>: λ&h. λt. λ{
+    #KV: λ&k. λv. λ{0: @assoc_has(key, t); λn. 1}(k == key)
+  }(h)
+}

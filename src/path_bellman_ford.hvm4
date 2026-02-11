@@ -1,0 +1,89 @@
+// Bellman-Ford single-source shortest path algorithm.
+//
+// Graph (5 nodes, directed, weighted):
+//   0 -> 1 (weight 4)
+//   0 -> 2 (weight 2)
+//   1 -> 3 (weight 3)
+//   2 -> 1 (weight 1)
+//   2 -> 3 (weight 5)
+//   3 -> 4 (weight 1)
+//
+// Shortest distances from source node 0:
+//   dist[0] = 0
+//   dist[1] = 3  (0->2->1: 2+1)
+//   dist[2] = 2  (0->2)
+//   dist[3] = 6  (0->2->1->3: 2+1+3)
+//   dist[4] = 7  (0->2->1->3->4: 2+1+3+1)
+
+// ---- constants ----
+
+@INF = 999999
+
+// ---- association list: list of #KV{key, value} pairs ----
+
+// assoc_get(key, default, alist): lookup key, return value or default
+@assoc_get = λ&key. λ&def. λ{
+  []: def;
+  <>: λ&h. λt. λ{
+    #KV: λ&k. λv. λ{0: @assoc_get(key, def, t); λn. v}(k == key)
+  }(h)
+}
+
+// assoc_set(key, value, alist): update existing or prepend new key-value pair
+@assoc_set = λ&key. λ&val. λ{
+  []: [#KV{key, val}];
+  <>: λ&h. λ&t. λ{
+    #KV: λ&k. λ&v. λ{0: #KV{k, v} <> @assoc_set(key, val, t); λn. #KV{k, val} <> t}(k == key)
+  }(h)
+}
+
+// ---- min ----
+
+@min = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+// ---- edge list ----
+// #E3{u, v, w} = directed edge from u to v with weight w
+
+@edges = [#E3{0,1,4}, #E3{0,2,2}, #E3{1,3,3}, #E3{2,1,1}, #E3{2,3,5}, #E3{3,4,1}]
+
+// ---- relax one edge ----
+// relax_edge(dist, edge): given distance table and an edge #E3{u,v,w},
+// if dist[u] + w < dist[v], update dist[v] = dist[u] + w
+
+@relax_edge = λ&dist. λ{
+  #E3: λ&u. λ&v. λw.
+    ! &du = @assoc_get(u, @INF, dist);
+    ! &new_d = du + w;
+    ! &dv = @assoc_get(v, @INF, dist);
+    λ{0: dist; λn. @assoc_set(v, new_d, dist)}(new_d < dv)
+}
+
+// ---- foldl: left fold threading accumulator through a list ----
+
+@foldl = λ&f. λ&acc. λ{[]: acc; <>: λh. λt. @foldl(f, f(acc, h), t)}
+
+// ---- relax all edges: fold relax_edge over edge list, threading dist ----
+
+@relax_round = λdist. @foldl(@relax_edge, dist, @edges)
+
+// ---- repeat: apply f to x, n times ----
+
+@repeat = λ&f. λ&x. λ{0: x; λn. @repeat(f, f(x), n - 1)}
+
+// ---- initial distance table: source 0 has distance 0 ----
+
+@init_dist = [#KV{0, 0}]
+
+// ---- run Bellman-Ford: V-1 = 4 rounds of relaxation ----
+
+@bf = @repeat(@relax_round, @init_dist, 4)
+
+// ---- extract results ----
+
+@main = [
+  @assoc_get(0, @INF, @bf),
+  @assoc_get(1, @INF, @bf),
+  @assoc_get(2, @INF, @bf),
+  @assoc_get(3, @INF, @bf),
+  @assoc_get(4, @INF, @bf)]
+//[0,3,2,6,7]

@@ -1,0 +1,80 @@
+// Bidirectional BFS for shortest unweighted path in an undirected graph.
+//
+// Graph (7 nodes, undirected, unweighted):
+//   0 -- 1, 0 -- 3
+//   1 -- 2
+//   2 -- 3
+//   3 -- 4, 3 -- 6
+//   4 -- 5
+//   5 -- 6
+//
+// Shortest path from 0 to 6: 0 -> 3 -> 6 = distance 2
+//
+// Algorithm: expand forward and backward frontiers alternately.
+// When any node appears in both frontiers, return the distance.
+// Since the graph is tiny (7 nodes) and max distance is bounded,
+// we skip visited tracking and rely on a depth limit.
+
+// ---- adjacency: node -> list of neighbors ----
+
+@adj = λ{
+  0: [1, 3];
+  1: [0, 2];
+  2: [1, 3];
+  3: [0, 2, 4, 6];
+  4: [3, 5];
+  5: [4, 6];
+  6: [3, 5];
+  λn. []
+}
+
+// ---- member(x, xs): is x in list? returns 0 or 1 ----
+
+@member = λ&x. λ{
+  []: 0;
+  <>: λ&h. λt. λ{0: @member(x, t); λn. 1}(h == x)
+}
+
+// ---- any_in(xs, ys): does any element of xs appear in ys? ----
+
+@any_in = λ&ys. λ{
+  []: 0;
+  <>: λ&h. λt. λ{0: @any_in(ys, t); λn. 1}(@member(h, ys))
+}
+
+// ---- append(xs, ys): concatenate two lists ----
+
+@append = λ{
+  []: λys. ys;
+  <>: λh. λt. λys. h <> @append(t, ys)
+}
+
+// ---- concat_map(f, xs): flatmap f over xs, concatenating results ----
+
+@concat_map = λ&f. λ{
+  []: [];
+  <>: λh. λt. @append(f(h), @concat_map(f, t))
+}
+
+// ---- expand(frontier): given a list of nodes, return all their neighbors ----
+
+@expand = λfrontier. @concat_map(@adj, frontier)
+
+// ---- bfs: bidirectional BFS main loop ----
+// fwd = forward frontier (list of nodes)
+// bwd = backward frontier (list of nodes)
+// dist = current total distance (sum of forward + backward expansions)
+// max = maximum distance before giving up
+
+@bfs = λ&fwd. λ&bwd. λ&dist. λ&max.
+  λ{
+    0: λ{
+      0: ! &new_fwd = @expand(fwd);
+        @bfs(bwd, new_fwd, dist + 1, max);
+      λn. dist
+    }(@any_in(bwd, fwd));
+    λn. 999
+  }(dist > max)
+
+@main = @bfs([0], [6], 0, 10)
+//2

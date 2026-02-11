@@ -1,0 +1,94 @@
+// _pq_lib_.hvm4 - Leftist min-heap priority queue library for HVM4.
+// Filename starts with _ so the test runner skips it.
+// Include with: #include "_pq_lib_.hvm4"
+//
+// Constructors:
+//   #PQE{}                              = empty heap
+//   #PQN{prio, val, left, right, rank}  = heap node
+//
+// Result constructor:
+//   #R{prio, val, rest}                 = pop result
+//
+// Functions:
+//   @pq_empty     -> #PQE{}
+//   @pq_is_empty  -> 1 if empty, 0 if non-empty
+//   @pq_rank      -> rank of a heap (0 for empty)
+//   @pq_make      -> create node, maintaining leftist property
+//   @pq_merge     -> merge two heaps
+//   @pq_insert    -> insert a (prio, val) pair
+//   @pq_pop       -> pop min element, returns #R{prio, val, rest}
+//   @pq_from_list -> build heap from list of #P{prio, val} pairs
+
+// ---------- empty heap ----------
+@pq_empty = #PQE{}
+
+// ---------- is_empty: check if a heap is empty ----------
+// Returns 1 for #PQE{}, 0 for #PQN{...}.
+@pq_is_empty = λ{
+  #PQE: 1;
+  #PQN: λp.λv.λl.λr.λk. 0
+}
+
+// ---------- rank: get rank of a heap ----------
+// #PQE{} has rank 0. #PQN{...} extracts the rank field.
+@pq_rank = λ{
+  #PQE: 0;
+  #PQN: λp.λv.λl.λr.λk. k
+}
+
+// ---------- make: construct a node maintaining leftist property ----------
+// Given prio, val, left subtree, right subtree:
+// Compare ranks of left and right. If left rank >= right rank, keep order;
+// otherwise swap children. New rank = right_rank + 1 (after possible swap).
+@pq_make = λ&prio.λ&val.λ&left.λ&right.
+  ! &lr = @pq_rank(left)
+  ! &rr = @pq_rank(right)
+  λ{0:
+    // lr < rr: swap left and right so leftist property holds
+    #PQN{prio, val, right, left, lr + 1};
+  λn.
+    // lr >= rr: keep order
+    #PQN{prio, val, left, right, rr + 1}
+  }(lr >= rr)
+
+// ---------- merge: merge two heaps ----------
+// Base cases: merging with empty returns the other heap.
+// Recursive: pick the root with smaller priority, merge its right child
+// with the other heap, then use pq_make to maintain leftist property.
+@pq_merge = λ{
+  #PQE: λb. b;
+  #PQN: λ&ap.λ&av.λ&al.λ&ar.λ&ak. λ{
+    #PQE: #PQN{ap, av, al, ar, ak};
+    #PQN: λ&bp.λ&bv.λ&bl.λ&br.λ&bk.
+      // Branch on (ap <= bp): nonzero means a is root, zero means b is root
+      λ{0:
+        // ap > bp: b has smaller priority, b is root
+        // merge a (reconstructed) into b's right subtree
+        @pq_make(bp, bv, bl, @pq_merge(#PQN{ap, av, al, ar, ak}, br));
+      λn.
+        // ap <= bp: a has smaller priority, a is root
+        // merge b (reconstructed) into a's right subtree
+        @pq_make(ap, av, al, @pq_merge(ar, #PQN{bp, bv, bl, br, bk}))
+      }(ap <= bp)
+  }
+}
+
+// ---------- insert: insert a single element ----------
+// Creates a singleton heap and merges it with the existing heap.
+@pq_insert = λprio.λval.λheap.
+  @pq_merge(#PQN{prio, val, #PQE{}, #PQE{}, 1}, heap)
+
+// ---------- pop: remove and return the minimum element ----------
+// Returns #R{prio, val, rest} where rest is the merged children.
+// Returns #PQE{} if the heap is empty (error/nothing case).
+@pq_pop = λ{
+  #PQE: #PQE{};
+  #PQN: λp.λv.λl.λr.λk. #R{p, v, @pq_merge(l, r)}
+}
+
+// ---------- from_list: build a heap from a list of #P{prio, val} pairs ----------
+// Folds over the list, inserting each pair into an initially empty heap.
+@pq_from_list = λ{
+  []: @pq_empty;
+  <>: λh.λt. λ{#P: λprio.λval. @pq_insert(prio, val, @pq_from_list(t))}(h)
+}

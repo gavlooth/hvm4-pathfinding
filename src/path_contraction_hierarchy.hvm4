@@ -1,0 +1,151 @@
+// Contraction Hierarchy shortest-path query.
+//
+// A contraction hierarchy (CH) is a precomputed overlay graph where nodes are
+// ranked by importance. The query performs bidirectional upward-only search:
+//   - Forward search from source, following edges to higher-ranked nodes
+//   - Backward search from target, following reverse edges to lower-ranked nodes
+//   - Answer = min over all meeting nodes v of dist_fwd[v] + dist_bwd[v]
+//
+// Graph (6 nodes, ranks 0..5, node id equals rank for simplicity):
+//
+// Upward adjacency (forward edges, only to higher-ranked nodes):
+//   0: [(1, 2), (2, 6)]
+//   1: [(2, 3), (3, 5)]
+//   2: [(4, 4)]
+//   3: [(4, 2), (5, 8)]
+//   4: [(5, 1)]
+//   5: []
+//
+// Backward upward adjacency (reverse edges, going from higher to lower):
+//   5: [(4, 1), (3, 8)]
+//   4: [(2, 4), (3, 2)]
+//   3: [(1, 5)]
+//   2: [(0, 6), (1, 3)]
+//   1: [(0, 2)]
+//   0: []
+//
+// Forward distances from source 0 (processed in rank order 0..5):
+//   dist_fwd[0] = 0
+//   dist_fwd[1] = 2          (0->1)
+//   dist_fwd[2] = 5          (0->1->2: 2+3)
+//   dist_fwd[3] = 7          (0->1->3: 2+5)
+//   dist_fwd[4] = 9          (min(5+4, 7+2) = 9)
+//   dist_fwd[5] = 10         (min(9+1, 7+8) = 10)
+//
+// Backward distances from target 5 (processed in reverse rank order 5..0):
+//   dist_bwd[5] = 0
+//   dist_bwd[4] = 1          (5<-4: 1)
+//   dist_bwd[3] = 3          (5<-4<-3: 1+2)
+//   dist_bwd[2] = 5          (5<-4<-2: 1+4)
+//   dist_bwd[1] = 8          (min(5+3, 3+5) = 8)
+//   dist_bwd[0] = 10         (min(8+2, 5+6) = 10)
+//
+// Meeting: min over all v of dist_fwd[v] + dist_bwd[v]:
+//   v=0: 0+10=10, v=1: 2+8=10, v=2: 5+5=10,
+//   v=3: 7+3=10, v=4: 9+1=10, v=5: 10+0=10
+//
+// Shortest path from 0 to 5 = 10.
+
+// ---- constants ----
+
+@INF = 999999
+
+// ---- min ----
+
+@min = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+// ---- association list: list of #KV{key, value} pairs ----
+
+// assoc_get(key, default, alist): lookup key, return value or default
+@assoc_get = λ&key. λ&def. λ{
+  []: def;
+  <>: λ&h. λt. λ{
+    #KV: λ&k. λv. λ{0: @assoc_get(key, def, t); λn. v}(k == key)
+  }(h)
+}
+
+// assoc_set(key, value, alist): update existing or prepend new key-value pair
+@assoc_set = λ&key. λ&val. λ{
+  []: [#KV{key, val}];
+  <>: λ&h. λ&t. λ{
+    #KV: λ&k. λ&v. λ{0: #KV{k, v} <> @assoc_set(key, val, t); λn. #KV{k, val} <> t}(k == key)
+  }(h)
+}
+
+// ---- foldl ----
+
+@foldl = λ&f. λ&acc. λ{[]: acc; <>: λh. λt. @foldl(f, f(acc, h), t)}
+
+// ---- forward adjacency: upward edges per node ----
+// fwd_adj(node) returns list of #E{target, weight}
+
+@fwd_adj = λ{
+  0: [#E{1, 2}, #E{2, 6}];
+  1: [#E{2, 3}, #E{3, 5}];
+  2: [#E{4, 4}];
+  3: [#E{4, 2}, #E{5, 8}];
+  4: [#E{5, 1}];
+  λn. []
+}
+
+// ---- backward adjacency: reverse upward edges per node ----
+// bwd_adj(node) returns list of #E{target, weight}
+
+@bwd_adj = λ{
+  5: [#E{4, 1}, #E{3, 8}];
+  4: [#E{2, 4}, #E{3, 2}];
+  3: [#E{1, 5}];
+  2: [#E{0, 6}, #E{1, 3}];
+  1: [#E{0, 2}];
+  λn. []
+}
+
+// ---- relax_edges: given a source distance and list of edges, update dist table ----
+// relax_edges(src_dist, edges, dist) -> updated dist
+
+@relax_edges = λ&src_d. λ&dist. λ{
+  []: dist;
+  <>: λh. λ&t. λ{
+    #E: λ&tgt. λw.
+      ! &new_d = src_d + w;
+      ! &old_d = @assoc_get(tgt, @INF, dist);
+      λ{0: @relax_edges(src_d, dist, t);
+         λn. @relax_edges(src_d, @assoc_set(tgt, new_d, dist), t)
+      }(new_d < old_d)
+  }(h)
+}
+
+// ---- process_node: relax all outgoing edges from a node if it has a known distance ----
+// process_node(adj_fn, dist, node) -> updated dist
+
+@process_node = λ&adj_fn. λ&dist. λ&node.
+  ! &d = @assoc_get(node, @INF, dist);
+  λ{0: @relax_edges(d, dist, adj_fn(node)); λn. dist}(d == @INF)
+
+// ---- forward pass: process nodes in rank order [0, 1, 2, 3, 4, 5] ----
+
+@fwd_nodes = [0, 1, 2, 3, 4, 5]
+
+@fwd_dist = @foldl(λ&dist. λnode. @process_node(@fwd_adj, dist, node), [#KV{0, 0}], @fwd_nodes)
+
+// ---- backward pass: process nodes in reverse rank order [5, 4, 3, 2, 1, 0] ----
+
+@bwd_nodes = [5, 4, 3, 2, 1, 0]
+
+@bwd_dist = @foldl(λ&dist. λnode. @process_node(@bwd_adj, dist, node), [#KV{5, 0}], @bwd_nodes)
+
+// ---- meet: find min over all nodes of dist_fwd[v] + dist_bwd[v] ----
+
+@all_nodes = [0, 1, 2, 3, 4, 5]
+
+@meet = λ&fd. λ&bd.
+  @foldl(
+    λ&best. λ&v.
+      ! &df = @assoc_get(v, @INF, fd);
+      ! &db = @assoc_get(v, @INF, bd);
+      @min(best, df + db),
+    @INF,
+    @all_nodes)
+
+@main = @meet(@fwd_dist, @bwd_dist)
+//10

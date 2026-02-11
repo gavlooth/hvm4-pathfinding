@@ -1,0 +1,80 @@
+// Association-list map library for HVM4.
+// Uses #P{key, val} pairs stored in a list.
+// Keys are compared with == (numeric equality).
+// Filename starts with _ so the test runner skips this file.
+
+// assoc_get: look up a key in an association list.
+// Returns the associated value if found, otherwise returns default.
+// Usage: @assoc_get(key, default, alist)
+@assoc_get = λ&key. λ&default. λ{
+  []: default;
+  <>: λh. λt. λ{#P: λ&k. λv. λ{
+    0: @assoc_get(key, default, t);
+    λn. v
+  }(k == key)}(h)
+}
+
+// assoc_set: set or update a key in an association list.
+// If the key exists, replaces its value. If not, appends #P{key, val}.
+// Usage: @assoc_set(key, val, alist)
+@assoc_set = λ&key. λ&val. λ{
+  []: #P{key, val} <> [];
+  <>: λ&h. λ&t. λ{#P: λ&k. λold. λ{
+    0: h <> @assoc_set(key, val, t);
+    λn. #P{k, val} <> t
+  }(k == key)}(h)
+}
+
+// assoc_has: check if a key exists in an association list.
+// Returns 1 if found, 0 if not found.
+// Usage: @assoc_has(key, alist)
+@assoc_has = λ&key. λ{
+  []: 0;
+  <>: λh. λt. λ{#P: λk. λv. λ{
+    0: @assoc_has(key, t);
+    λn. 1
+  }(k == key)}(h)
+}
+
+// assoc_del: remove a key from an association list.
+// Returns the list without the first entry matching key.
+// Usage: @assoc_del(key, alist)
+@assoc_del = λ&key. λ{
+  []: [];
+  <>: λ&h. λ&t. λ{#P: λk. λv. λ{
+    0: h <> @assoc_del(key, t);
+    λn. t
+  }(k == key)}(h)
+}
+
+// assoc_get_or: alias for assoc_get (get with default).
+// Usage: @assoc_get_or(key, default, alist)
+@assoc_get_or = λkey. λdefault. λalist. @assoc_get(key, default, alist)
+
+// assoc_keys: extract all keys from an association list.
+// Returns a list of keys.
+// Usage: @assoc_keys(alist)
+@assoc_keys = λ{
+  []: [];
+  <>: λh. λt. λ{#P: λk. λv. k <> @assoc_keys(t)}(h)
+}
+
+// assoc_vals: extract all values from an association list.
+// Returns a list of values.
+// Usage: @assoc_vals(alist)
+@assoc_vals = λ{
+  []: [];
+  <>: λh. λt. λ{#P: λk. λv. v <> @assoc_vals(t)}(h)
+}
+
+// assoc_from_lists: zip two lists into an association list.
+// Given a list of keys and a list of values, produces a list of #P{key, val}.
+// If lists differ in length, stops at the shorter one.
+// Usage: @assoc_from_lists(keys, vals)
+@assoc_from_lists = λ{
+  []: λvs. [];
+  <>: λk. λks. λ{
+    []: [];
+    <>: λv. λvs. #P{k, v} <> @assoc_from_lists(ks, vs)
+  }
+}
