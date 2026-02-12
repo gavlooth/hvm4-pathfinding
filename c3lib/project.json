@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "authors": ["gavlooth"],
   "sources": ["src/**"],
+  "c-sources": ["csrc/**"],
+  "cc": "clang",
+  "linked-libraries": ["pthread"],
   "output": "build",
   "targets": {
     "pathfind": {

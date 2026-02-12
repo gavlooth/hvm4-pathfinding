@@ -29,6 +29,10 @@ fn void main() {
     int pass = 0;
     int fail = 0;
 
+    // Initialize HVM4 runtime
+    pathfind::runtime_init();
+    defer pathfind::runtime_cleanup();
+
     // === 1. Bellman-Ford ===
     {
         pathfind::Graph g;
