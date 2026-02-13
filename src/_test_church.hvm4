@@ -1,0 +1,22 @@
+// Fix: rename dist to d to avoid substring collision
+@INF = 999
+@get = λ&i. λ{[]: @INF; <>: λ&h. λt. λ{0: h; λk. @get(i - 1, t)}(i)}
+@set = λ&i. λ&val. λ{[]: []; <>: λ&h. λ&t. λ{0: val <> t; λk. h <> @set(i - 1, val, t)}(i)}
+@min = λ&a. λ&b. λ{0: b; λk. a}(a < b)
+@fst = λ{[]: 0; <>: λ&h. λt. h}
+@snd = λ{[]: 0; <>: λh. λ{[]: 0; <>: λ&v. λt. v}}
+
+@relax_edges = λ&d. λ&node_dist. λ{
+  []: d;
+  <>: λ&edge. λrest.
+    ! &target = @fst(edge);
+    ! &w = @snd(edge);
+    ! &nd = node_dist + w;
+    ! &old = @get(target, d);
+    ! &better = @min(nd, old);
+    ! &upd = @set(target, better, d);
+    @relax_edges(upd, node_dist, rest)
+}
+
+@main = @relax_edges([0, @INF, @INF, @INF], 0, [[1, 4], [2, 7], [3, 10]])
+// Expected: [0, 4, 7, 10]

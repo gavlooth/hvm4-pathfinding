@@ -1,0 +1,107 @@
+@Edge/E = (a (b (c ((@Edge/E/tag (a (b (c d)))) d))))
+
+@Edge/E/tag = 0
+
+@List/Cons = (a (b ((@List/Cons/tag (a (b c))) c)))
+
+@List/Cons/tag = 1
+
+@List/Nil = ((@List/Nil/tag a) a)
+
+@List/Nil/tag = 0
+
+@boruvka = (b (c (d ({$([=0x0000000] ?((@boruvka__C1 (* (* (* (a (* a)))))) (b (c (d (e f)))))) e} f))))
+
+@boruvka__C0 = (a ({j {h d}} (m ($([:-0x0000001] o) ({l {f b}} p)))))
+  & @boruvka ~ (a (k (n (o p))))
+  & @update_comp ~ (e (i (j k)))
+  & @get_comp ~ (c (d e))
+  & @get_src ~ (b c)
+  & @get_comp ~ (g (h i))
+  & @get_dst ~ (f g)
+  & @List/Cons ~ (l (m n))
+
+@boruvka__C1 = ({f a} ({g b} (h (i k))))
+  & @get_weight ~ (d $([=0x000270F] ?((@boruvka__C0 (* (* (* (e (* (* e))))))) (f (g (h (i (j k))))))))
+  & @min_edge ~ (c {j d})
+  & @cross_edges ~ (a (b c))
+
+@cross_edges = ((@cross_edges__C2 (a b)) (a b))
+
+@cross_edges__C0 = (* (a (b c)))
+  & @List/Cons ~ (a (b c))
+
+@cross_edges__C1 = (* ({a d} (e ({b f} h))))
+  & @crosses ~ (a (b $([=0x0000001] ?(((* (c c)) @cross_edges__C0) (d (g h))))))
+  & @cross_edges ~ (e (f g))
+
+@cross_edges__C2 = (?(((* @List/Nil) @cross_edges__C1) a) a)
+
+@crosses = ({d a} ({f c} h))
+  & @get_comp ~ (b (c $([=] $(g ?((1 (* 0)) h)))))
+  & @get_src ~ (a b)
+  & @get_comp ~ (e (f g))
+  & @get_dst ~ (d e)
+
+@get_comp = (a ((@get_comp__C2 (a b)) b))
+
+@get_comp__C0 = ($([:-0x0000001] a) (* (b c)))
+  & @get_comp ~ (a (b c))
+
+@get_comp__C1 = (* (c (d ({$([=0x0000000] ?((@get_comp__C0 (* (* (a (* a))))) (b (c (d e))))) b} e))))
+
+@get_comp__C2 = (?(((* -1) @get_comp__C1) a) a)
+
+@get_dst = ((@get_dst__C0 a) a)
+
+@get_dst__C0 = (?(((* (a (* a))) *) b) b)
+
+@get_src = ((@get_src__C0 a) a)
+
+@get_src__C0 = (?(((a (* (* a))) *) b) b)
+
+@get_weight = ((@get_weight__C0 a) a)
+
+@get_weight__C0 = (?(((* (* (a a))) *) b) b)
+
+@main = e
+  & @boruvka ~ (@test_edges (d (@List/Nil (5 e))))
+  & @List/Cons ~ (0 (c d))
+  & @List/Cons ~ (1 (b c))
+  & @List/Cons ~ (2 (a b))
+  & @List/Cons ~ (3 (@List/Nil a))
+
+@min_edge = ((@min_edge__C1 a) a)
+
+@min_edge__C0 = (* ({g b} (a i)))
+  & @get_weight ~ (b $([<] $(d ?(((* (e e)) (* (f (* f)))) (g (h i))))))
+  & @min_edge ~ (a {h c})
+  & @get_weight ~ (c d)
+
+@min_edge__C1 = (?((a @min_edge__C0) b) b)
+  & @Edge/E ~ (-1 (-1 (9999 a)))
+
+@test_edges = h
+  & @List/Cons ~ (a (g h))
+  & @Edge/E ~ (0 (1 (1 a)))
+  & @List/Cons ~ (b (f g))
+  & @Edge/E ~ (1 (2 (2 b)))
+  & @List/Cons ~ (c (e f))
+  & @Edge/E ~ (0 (3 (3 c)))
+  & @List/Cons ~ (d (@List/Nil e))
+  & @Edge/E ~ (2 (3 (4 d)))
+
+@update_comp = (a (b ((@update_comp__C3 (a (b c))) c)))
+
+@update_comp__C0 = (* (a (b c)))
+  & @List/Cons ~ (a (b c))
+
+@update_comp__C1 = (* (a (* (b c))))
+  & @List/Cons ~ (a (b c))
+
+@update_comp__C2 = (* ({$([=] $(a ?((@update_comp__C0 @update_comp__C1) (b (c (g h)))))) c} (f ({b d} ({a e} h)))))
+  & @update_comp ~ (d (e (f g)))
+
+@update_comp__C3 = (?(((* (* @List/Nil)) @update_comp__C2) a) a)
+
+

@@ -1,0 +1,93 @@
+// Borůvka MST - translated from Bend
+// 
+// Each iteration: find min cross-component edge, merge components
+
+// ---- Edge constructor ----
+
+@Edge = λsrc. λdst. λweight. λf. f(src)(dst)(weight)
+
+@get_src = λe. e(λs. λd. λw. s)
+@get_dst = λe. e(λs. λd. λw. d)  
+@get_weight = λe. e(λs. λd. λw. w)
+
+// ---- Get component at index ----
+
+@get_comp = λ&i. λcomp. λ{
+  []: 0 - 1;  // -1 for not found
+  <>: λ&h. λ&t. λ{
+    0: h;
+    λk. @get_comp(i - 1)(t)
+  }(i)
+}(comp)
+
+// ---- Check if edge crosses components ----
+
+@crosses = λ&e. λ&comp.
+  ! &u = @get_src(e);
+  ! &v = @get_dst(e);
+  ! &cu = @get_comp(u)(comp);
+  ! &cv = @get_comp(v)(comp);
+  λ{0: 1; λk. 0}(cu == cv)  // 1 if different, 0 if same
+
+// ---- Filter crossing edges ----
+
+@cross_edges = λ&comp. λedges. λ{
+  []: [];
+  <>: λ&e. λ&rest.
+    ! &tail = @cross_edges(comp)(rest);
+    ! &cr = @crosses(e)(comp);
+    λ{0: tail; λk. e <> tail}(cr)
+}(edges)
+
+// ---- Min weight edge ----
+
+@min_edge = λedges. λ{
+  []: @Edge(0 - 1)(0 - 1)(9999);
+  <>: λ&h. λ&t.
+    ! &rest_min = @min_edge(t);
+    ! &hw = @get_weight(h);
+    ! &rw = @get_weight(rest_min);
+    λ{0: rest_min; λk. h}(hw < rw)
+}(edges)
+
+// ---- Update component: replace cv with cu ----
+
+@update_comp = λ&cu. λ&cv. λcomp. λ{
+  []: [];
+  <>: λ&h. λ&t.
+    ! &rest = @update_comp(cu)(cv)(t);
+    λ{0: h <> rest; λk. cu <> rest}(h == cv)
+}(comp)
+
+// ---- Borůvka iteration ----
+
+@boruvka = λ&edges. λ&comp. λ&mst. λ&fuel. λ{
+  0: mst;
+  λ&f.
+    ! &crossing = @cross_edges(comp)(edges);
+    ! &e = @min_edge(crossing);
+    ! &w = @get_weight(e);
+    λ{
+      0:  // w < 9999, found edge
+        ! &u = @get_src(e);
+        ! &v = @get_dst(e);
+        ! &cu = @get_comp(u)(comp);
+        ! &cv = @get_comp(v)(comp);
+        ! &new_comp = @update_comp(cu)(cv)(comp);
+        ! &new_mst = e <> mst;
+        @boruvka(edges)(new_comp)(new_mst)(f);
+      λk. mst  // w == 9999, done
+    }(w == 9999)
+}(fuel)
+
+// ---- Test ----
+
+@test_edges =
+  @Edge(0)(1)(1) <> @Edge(1)(2)(2) <> @Edge(0)(3)(3) <> @Edge(2)(3)(4) <> []
+
+@main =
+  ! &edges = @test_edges;
+  ! &comp = 0 <> 1 <> 2 <> 3 <> [];
+  @boruvka(edges)(comp)([])(5)
+
+// Expected MST: 3 edges with total weight 6

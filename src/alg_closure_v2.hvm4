@@ -1,0 +1,76 @@
+// Transitive Closure - translated from Bend compilation
+// 
+// Pattern: BFS with visited set and fuel limit
+
+// ---- Edge: Church pair (src, dst) ----
+
+@Edge = λsrc. λdst. λf. f(src)(dst)
+
+@get_src = λedge. edge(λsrc. λdst. src)
+@get_dst = λedge. edge(λsrc. λdst. dst)
+
+// ---- List append ----
+
+@append = λxs. λ&ys. λ{
+  []: ys;
+  <>: λh. λ&t. h <> @append(t)(ys)
+}(xs)
+
+// ---- Check membership ----
+
+@member = λ&x. λlist. λ{
+  []: 0;
+  <>: λ&h. λ&t. λ{
+    0: @member(x)(t);
+    λk. 1
+  }(h == x)
+}(list)
+
+// ---- Get neighbors of a node ----
+
+@neighbors_acc = λ&node. λ&acc. λedges. λ{
+  []: acc;
+  <>: λ&edge. λ&rest.
+    ! &src = @get_src(edge);
+    ! &dst = @get_dst(edge);
+    λ{
+      0: @neighbors_acc(node)(acc)(rest);
+      λk. @neighbors_acc(node)(dst <> acc)(rest)
+    }(src == node)
+}(edges)
+
+@neighbors = λnode. λedges. @neighbors_acc(node)([])(edges)
+
+// ---- BFS step ----
+// Process one node from frontier
+
+@bfs_step = λ&edges. λ&visited. λ&fuel. λfrontier.
+  λ{
+    0: visited;
+    λ&f.
+      λ{
+        []: visited;
+        <>: λ&node. λ&rest.
+          ! &mem = @member(node)(visited);
+          λ{
+            0:
+              ! &nbrs = @neighbors(node)(edges);
+              ! &new_front = @append(rest)(nbrs);
+              ! &new_vis = node <> visited;
+              @bfs_step(edges)(new_vis)(f)(new_front);
+            λk.
+              @bfs_step(edges)(visited)(f)(rest)
+          }(mem)
+      }(frontier)
+  }(fuel)
+
+// ---- Test ----
+
+@test_edges = 
+  @Edge(0)(1) <> @Edge(0)(3) <> @Edge(1)(2) <> []
+
+@main = 
+  ! &edges = @test_edges;
+  @bfs_step(edges)([])(10)(0 <> [])
+
+// Expected: [2, 3, 1, 0] - all nodes reachable from 0

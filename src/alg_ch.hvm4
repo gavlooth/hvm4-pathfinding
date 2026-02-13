@@ -1,0 +1,129 @@
+// Contraction Hierarchy Query (Bend-style)
+//
+// Pre-contracted graph with upward edges and shortcut edges.
+// Bidirectional search: forward from src (up), backward from dst (down).
+// Meeting point: min(fwd[v] + bwd[v]) over all nodes.
+//
+// Original graph (4 nodes, undirected, weighted):
+//   0-1: 4, 0-3: 10, 1-2: 3, 2-3: 1
+//
+// Rank order: 0 < 1 < 2 < 3
+// Shortcuts from contraction:
+//   0→2: 7 (via 0→1→2 = 4+3)
+//
+// Shortest paths:
+//   0→3: 8 (via 0→1→2→3 = 4+3+1)
+//   0→2: 7 (via 0→1→2 = 4+3)
+//   0→1: 4, 1→3: 4 (via 1→2→3 = 3+1)
+//
+// Usage: HVM4/clang/main src/alg_ch.hvm4 -s
+
+@INF = 999
+
+// ---- List operations ----
+
+@get = λ&i. λ{
+  []: @INF;
+  <>: λ&h. λt. λ{0: h; λk. @get(i - 1, t)}(i)
+}
+
+@set = λ&i. λ&val. λ{
+  []: [];
+  <>: λ&h. λ&t. λ{0: val <> t; λk. h <> @set(i - 1, val, t)}(i)
+}
+
+@min = λ&a. λ&b. λ{0: b; λk. a}(a < b)
+
+// ---- Upward adjacency (forward: lower rank → higher rank) ----
+// Includes shortcut 0→2:7
+
+@up_adj = λ{
+  0: [[1, 4], [2, 7], [3, 10]];
+  1: [[2, 3]];
+  2: [[3, 1]];
+  3: [];
+  λn. []
+}
+
+// ---- Downward adjacency (backward: reverse of upward edges) ----
+
+@down_adj = λ{
+  0: [];
+  1: [[0, 4]];
+  2: [[0, 7], [1, 3]];
+  3: [[0, 10], [2, 1]];
+  λn. []
+}
+
+// ---- Relax all edges from a node with given distance ----
+
+@relax_edges = λ&dist. λ&node_dist. λ{
+  []: dist;
+  <>: λ&edge. λrest.
+    λ{<>: λ&target. λ{<>: λ&w. λnil.
+      ! &new_d = node_dist + w;
+      ! &old_d = @get(target, dist);
+      ! &better = @min(new_d, old_d);
+      ! &upd = @set(target, better, dist);
+      @relax_edges(upd, node_dist, rest)
+    }}(edge)
+}
+
+// ---- Forward search: process nodes 0..n-1 (increasing rank) ----
+
+@search_fwd = λ&dist. λ&node. λ&rem.
+  λ{
+    0: dist;
+    λk.
+      ! &d = @get(node, dist);
+      ! &edges = @up_adj(node);
+      ! &upd = @relax_edges(dist, d, edges);
+      @search_fwd(upd, node + 1, rem - 1)
+  }(rem)
+
+// ---- Backward search: process nodes n-1..0 (decreasing rank) ----
+
+@search_bwd = λ&dist. λ&node. λ&rem.
+  λ{
+    0: dist;
+    λk.
+      ! &d = @get(node, dist);
+      ! &edges = @down_adj(node);
+      ! &upd = @relax_edges(dist, d, edges);
+      @search_bwd(upd, node - 1, rem - 1)
+  }(rem)
+
+// ---- Meeting point: min(fwd[i] + bwd[i]) over all nodes ----
+
+@meeting = λ&i. λ&rem. λ&fwd. λ&bwd.
+  λ{
+    0: @INF;
+    λk.
+      ! &f = @get(i, fwd);
+      ! &b = @get(i, bwd);
+      ! &sum = f + b;
+      ! &rest = @meeting(i + 1, rem - 1, fwd, bwd);
+      @min(sum, rest)
+  }(rem)
+
+// ---- CH Query ----
+
+@ch_query = λ&src. λ&dst. λ&n.
+  ! &fwd_init = @set(src, 0, [@INF, @INF, @INF, @INF]);
+  ! &bwd_init = @set(dst, 0, [@INF, @INF, @INF, @INF]);
+  ! &fwd = @search_fwd(fwd_init, 0, n);
+  ! &bwd = @search_bwd(bwd_init, n - 1, n);
+  @meeting(0, n, fwd, bwd)
+
+// ---- Main: test all source-destination pairs ----
+
+@main =
+  [@ch_query(0, 3, 4),
+   @ch_query(0, 2, 4),
+   @ch_query(0, 1, 4),
+   @ch_query(1, 3, 4)]
+// Expected: [8, 7, 4, 4]
+// 0→3: 0→1→2→3 = 4+3+1 = 8
+// 0→2: 0→1→2 = 4+3 = 7
+// 0→1: direct = 4
+// 1→3: 1→2→3 = 3+1 = 4

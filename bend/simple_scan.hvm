@@ -1,0 +1,72 @@
+@BinTree/Leaf = (a ((@BinTree/Leaf/tag (a b)) b))
+
+@BinTree/Leaf/tag = 0
+
+@BinTree/Node = (a (b ((@BinTree/Node/tag (a (b c))) c)))
+
+@BinTree/Node/tag = 1
+
+@List/Cons = (a (b ((@List/Cons/tag (a (b c))) c)))
+
+@List/Cons/tag = 1
+
+@List/Nil = ((@List/Nil/tag a) a)
+
+@List/Nil/tag = 0
+
+@append = ((@append__C1 (a b)) (a b))
+
+@append__C0 = (* (a (b (c e))))
+  & @List/Cons ~ (a (d e))
+  & @append ~ (b (c d))
+
+@append__C1 = (?(((a a) @append__C0) b) b)
+
+@build = ({$([=0x0000000] ?((@build__C0 @build__C1) (a (b c)))) a} (b c))
+
+@build__C0 = ({$([:-0x0000001] a) $([:-0x0000001] d)} ({$([*0x0000002] b) $([*0x0000002] $([+0x0000001] e))} g))
+  & @BinTree/Node ~ (c (f g))
+  &!@build ~ (a (b c))
+  &!@build ~ (d (e f))
+
+@build__C1 = (* (* ($([+0x0000001] a) b)))
+  & @BinTree/Leaf ~ (a b)
+
+@flatten = ((@flatten__C2 a) a)
+
+@flatten__C0 = (a b)
+  & @List/Cons ~ (a (@List/Nil b))
+
+@flatten__C1 = (* (a (c e)))
+  & @append ~ (b (d e))
+  &!@flatten ~ (a b)
+  &!@flatten ~ (c d)
+
+@flatten__C2 = (?((@flatten__C0 @flatten__C1) a) a)
+
+@main = b
+  & @prefix ~ (a (0 b))
+  & @build ~ (2 (0 a))
+
+@prefix = ((@prefix__C2 (a b)) (a b))
+
+@prefix__C0 = (* (a b))
+  & @List/Cons ~ (a (@List/Nil b))
+
+@prefix__C1 = (* ({a e} (d ({b $([+] $(f g))} i))))
+  & @append ~ (c (h i))
+  &!@prefix ~ (a (b c))
+  &!@prefix ~ (d (g h))
+  & @tree_sum ~ (e f)
+
+@prefix__C2 = (?((@prefix__C0 @prefix__C1) a) a)
+
+@tree_sum = ((@tree_sum__C1 a) a)
+
+@tree_sum__C0 = (* (a (b d)))
+  &!@tree_sum ~ (a $([+] $(c d)))
+  &!@tree_sum ~ (b c)
+
+@tree_sum__C1 = (?(((a a) @tree_sum__C0) b) b)
+
+

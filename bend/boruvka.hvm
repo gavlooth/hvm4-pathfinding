@@ -1,0 +1,58 @@
+@Edge/E = (a (b (c ((@Edge/E/tag (a (b (c d)))) d))))
+
+@Edge/E/tag = 0
+
+@List/Cons = (a (b ((@List/Cons/tag (a (b c))) c)))
+
+@List/Cons/tag = 1
+
+@List/Nil = ((@List/Nil/tag a) a)
+
+@List/Nil/tag = 0
+
+@edges_from = (a ((@edges_from__C2 (a b)) b))
+
+@edges_from__C0 = (* (a (b c)))
+  & @List/Cons ~ (a (b c))
+
+@edges_from__C1 = (* ({d a} (f ({b e} h))))
+  & @get_src ~ (a $([=] $(b ?(((* (c c)) @edges_from__C0) (d (g h))))))
+  & @edges_from ~ (e (f g))
+
+@edges_from__C2 = (?(((* @List/Nil) @edges_from__C1) a) a)
+
+@get_src = ((@get_src__C0 a) a)
+
+@get_src__C0 = (?(((a (* (* a))) *) b) b)
+
+@get_weight = ((@get_weight__C0 a) a)
+
+@get_weight__C0 = (?(((* (* (a a))) *) b) b)
+
+@main = b
+  & @min_edge ~ (a b)
+  & @edges_from ~ (0 (@test_edges a))
+
+@min_edge = ((@min_edge__C1 a) a)
+
+@min_edge__C0 = (* ({g b} (a i)))
+  & @get_weight ~ (b $([<] $(d ?(((* (e e)) (* (f (* f)))) (g (h i))))))
+  & @min_edge ~ (a {h c})
+  & @get_weight ~ (c d)
+
+@min_edge__C1 = (?((a @min_edge__C0) b) b)
+  & @Edge/E ~ (-1 (-1 (9999 a)))
+
+@test_edges = j
+  & @List/Cons ~ (a (i j))
+  & @Edge/E ~ (0 (1 (1 a)))
+  & @List/Cons ~ (b (h i))
+  & @Edge/E ~ (1 (2 (2 b)))
+  & @List/Cons ~ (c (g h))
+  & @Edge/E ~ (0 (3 (3 c)))
+  & @List/Cons ~ (d (f g))
+  & @Edge/E ~ (1 (4 (4 d)))
+  & @List/Cons ~ (e (@List/Nil f))
+  & @Edge/E ~ (3 (4 (5 e)))
+
+

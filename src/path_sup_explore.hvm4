@@ -1,0 +1,36 @@
+// SUP-based shortest path exploration (proof-of-concept)
+//
+// Uses HVM4 superpositions to explore ALL paths from source to destination.
+// Collapse mode enumerates every path's total weight; the minimum is shortest.
+//
+// Graph (5 nodes, directed, weighted):
+//   0 -> 1 (weight 4),  0 -> 2 (weight 2)
+//   1 -> 3 (weight 3)
+//   2 -> 1 (weight 1),  2 -> 3 (weight 5)
+//   3 -> 4 (weight 1)
+//   4: destination
+//
+// All paths from 0 to 4:
+//   0->1->3->4         : 4+3+1 = 8
+//   0->2->1->3->4      : 2+1+3+1 = 7  (shortest)
+//   0->2->3->4          : 2+5+1 = 8
+//
+// Each branching node (degree > 1) creates a SUP with a distinct label.
+// Collapse mode (-C10) enumerates all 3 paths: 8, 7, 8.
+//
+// Usage: HVM4/clang/main src/path_sup_explore.hvm4 -C10
+// Expected output (unordered): 8, 7, 8
+
+@explore = λ{
+  0: &A{4 + @explore(1), 2 + @explore(2)};
+  1: 3 + @explore(3);
+  2: &B{1 + @explore(1), 5 + @explore(3)};
+  3: 1 + @explore(4);
+  4: 0;
+  λn. 999999
+}
+
+@main = @explore(0)
+//8
+//7
+//8

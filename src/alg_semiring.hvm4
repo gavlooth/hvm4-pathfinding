@@ -1,0 +1,111 @@
+// Algebraic Semiring Shortest Paths (Bend-style)
+//
+// Tropical semiring: (min, +, INF, 0)
+// Matrix squaring: D^(2^k) computes shortest paths of length <= 2^k.
+// Repeated squaring: log(n) iterations for n-node graph.
+//
+// Graph (4 nodes, directed, weighted):
+//   0->1: 4, 0->3: 10
+//   1->2: 3
+//   2->3: 1
+//   3: no outgoing
+//
+// Distance matrix D (INF = 999):
+//   [[0, 4, 999, 10], [999, 0, 3, 999], [999, 999, 0, 1], [999, 999, 999, 0]]
+//
+// After closure (shortest paths):
+//   [[0, 4, 7, 8], [999, 0, 3, 4], [999, 999, 0, 1], [999, 999, 999, 0]]
+//
+// 0->2 = 0->1->2 = 4+3 = 7
+// 0->3 = 0->1->2->3 = 4+3+1 = 8 (shorter than direct 0->3=10)
+//
+// Usage: HVM4/clang/main src/alg_semiring.hvm4 -s
+
+@INF = 999
+
+@min = λ&a. λ&b. λ{0: b; λk. a}(a < b)
+
+// ---- Flat list indexing ----
+
+@nth = λ&i. λ{
+  []: @INF;
+  <>: λ&h. λt. λ{0: h; λk. @nth(i - 1, t)}(i)
+}
+
+// ---- Tropical dot product: min_k(A[i,k] + B[k,j]) ----
+
+@dot = λ&A. λ&B. λ&N. λ&i. λ&j. λ&k. λ&rem.
+  λ{
+    0: @INF;
+    λr.
+      ! &a_ik = @nth(i * N + k, A);
+      ! &b_kj = @nth(k * N + j, B);
+      ! &term = a_ik + b_kj;
+      ! &rest = @dot(A, B, N, i, j, k + 1, rem - 1);
+      @min(term, rest)
+  }(rem)
+
+// ---- Build result matrix cell by cell (flat list) ----
+
+@build_cells = λ&A. λ&B. λ&N. λ&idx. λ&rem.
+  λ{
+    0: [];
+    λr.
+      ! &i = idx / N;
+      ! &j = idx % N;
+      ! &val = @dot(A, B, N, i, j, 0, N);
+      val <> @build_cells(A, B, N, idx + 1, rem - 1)
+  }(rem)
+
+@mat_mul = λ&A. λ&B. λ&N.
+  @build_cells(A, B, N, 0, N * N)
+
+// ---- Element-wise min of two flat matrices ----
+
+@mat_min = λ{
+  []: λB. [];
+  <>: λ&ah. λ&at. λ{
+    []: ah <> at;
+    <>: λ&bh. λbt.
+      @min(ah, bh) <> @mat_min(at, bt)
+  }
+}
+
+// ---- Repeated squaring ----
+
+@closure = λ&iters. λ&D. λ&N.
+  λ{
+    0: D;
+    λk.
+      ! &D2 = @mat_mul(D, D, N);
+      ! &Dnew = @mat_min(D, D2);
+      @closure(iters - 1, Dnew, N)
+  }(iters)
+
+// ---- Reshape flat list → list of rows ----
+
+@take = λ&n. λ{
+  []: [];
+  <>: λ&h. λt. λ{0: []; λk. h <> @take(n - 1, t)}(n)
+}
+
+@drop = λ&n. λ&xs.
+  λ{
+    0: xs;
+    λk. λ{[]: []; <>: λh. λt. @drop(n - 1, t)}(xs)
+  }(n)
+
+@reshape = λ&N. λ&rows. λ&xs.
+  λ{
+    0: [];
+    λk. @take(N, xs) <> @reshape(N, rows - 1, @drop(N, xs))
+  }(rows)
+
+// ---- Input: 4x4 distance matrix (flat) ----
+
+@dist = [0, 4, 999, 10, 999, 0, 3, 999, 999, 999, 0, 1, 999, 999, 999, 0]
+
+@main =
+  ! &result = @closure(2, @dist, 4);
+  @reshape(4, 4, result)
+// Expected: [[0,4,7,8],[999,0,3,4],[999,999,0,1],[999,999,999,0]]

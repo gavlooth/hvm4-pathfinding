@@ -1,0 +1,64 @@
+// Transitive Closure via Depth-Bounded Exploration (Bend-style)
+//
+// Graph: 0->1, 0->3, 1->2, 2->3 (4 nodes, directed)
+// Closure: all (src,dst) pairs where src can reach dst.
+//
+// Uses bounded DFS: can_reach(src, dst, depth) explores neighbors recursively.
+// Parallel over all (src,dst) pairs — matrix of 4x4 cells computed independently.
+//
+// Expected result:
+//   [[1,1,1,1],[0,1,1,1],[0,0,1,1],[0,0,0,1]]
+//   (0 reaches all; 1 reaches 2,3; 2 reaches 3; 3 reaches self only)
+//
+// Usage: HVM4/clang/main src/alg_closure.hvm4 -s
+
+// ---- Graph adjacency: node -> list of neighbors ----
+
+@adj = λ{
+  0: [1, 3];
+  1: [2];
+  2: [3];
+  3: [];
+  λn. []
+}
+
+// ---- Check if any node in neighbor list can reach dst ----
+// Takes (dst, depth) then the list as the matched argument.
+
+@any_reaches = λ&dst. λ&depth. λ{
+  []: 0;
+  <>: λ&next. λrest.
+    λ{
+      0: @any_reaches(dst, depth, rest);
+      λk. 1
+    }(@can_reach(next, dst, depth))
+}
+
+// ---- Check reachability: can src reach dst within given depth? ----
+
+@can_reach = λ&src. λ&dst. λ&depth.
+  λ{
+    0: λ{0: 0; λk. 1}(src == dst);
+    λd.
+      λ{
+        0: @any_reaches(dst, depth - 1, @adj(src));
+        λk. 1
+      }(src == dst)
+  }(depth)
+
+// ---- Build closure matrix (4x4) ----
+
+@row = λ&src. λ&depth.
+  [@can_reach(src, 0, depth),
+   @can_reach(src, 1, depth),
+   @can_reach(src, 2, depth),
+   @can_reach(src, 3, depth)]
+
+@closure = λ&depth.
+  [@row(0, depth),
+   @row(1, depth),
+   @row(2, depth),
+   @row(3, depth)]
+
+@main = @closure(4)
+// Expected: [[1,1,1,1],[0,1,1,1],[0,0,1,1],[0,0,0,1]]

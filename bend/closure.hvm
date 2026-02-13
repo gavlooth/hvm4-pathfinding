@@ -1,0 +1,80 @@
+@Edge/E = (a (b ((@Edge/E/tag (a (b c))) c)))
+
+@Edge/E/tag = 0
+
+@List/Cons = (a (b ((@List/Cons/tag (a (b c))) c)))
+
+@List/Cons/tag = 1
+
+@List/Nil = ((@List/Nil/tag a) a)
+
+@List/Nil/tag = 0
+
+@append = ((@append__C1 (a b)) (a b))
+
+@append__C0 = (* (a (b (c e))))
+  & @List/Cons ~ (a (d e))
+  & @append ~ (b (c d))
+
+@append__C1 = (?(((a a) @append__C0) b) b)
+
+@bfs = (b (c (d ({$([=0x0000000] ?((@bfs__C4 (* (* (* (a (* a)))))) (b (c (d (e f)))))) e} f))))
+
+@bfs__C0 = ({f c} (h ($([:-0x0000001] j) ({g b} (a k)))))
+  & @bfs ~ (e (f (i (j k))))
+  & @append ~ (a (d e))
+  & @neighbors ~ (b (c d))
+  & @List/Cons ~ (g (h i))
+
+@bfs__C1 = (* (b (c ($([:-0x0000001] d) (* (a e))))))
+  & @bfs ~ (a (b (c (d e))))
+
+@bfs__C2 = (* ({a f} (g (c ({b d} (e h))))))
+  & @member ~ (a (b $([=0x0000001] ?((@bfs__C0 @bfs__C1) (c (d (e (f (g h)))))))))
+
+@bfs__C3 = (?(((* (a (* a))) @bfs__C2) b) b)
+
+@bfs__C4 = ((@bfs__C3 (a (b (c d)))) (a (b (c d))))
+
+@get_dst = ((@get_dst__C0 a) a)
+
+@get_dst__C0 = (?(((* (a a)) *) b) b)
+
+@get_src = ((@get_src__C0 a) a)
+
+@get_src__C0 = (?(((a (* a)) *) b) b)
+
+@main = b
+  & @bfs ~ (a (@test_edges (@List/Nil (10 b))))
+  & @List/Cons ~ (0 (@List/Nil a))
+
+@member = (a ((@member__C2 (a b)) b))
+
+@member__C0 = (a (b c))
+  & @member ~ (a (b c))
+
+@member__C1 = (* ($([=] $(a ?((@member__C0 (* (* (* 1)))) (b (c d))))) (c ({a b} d))))
+
+@member__C2 = (?(((* 0) @member__C1) a) a)
+
+@neighbors = (a ((@neighbors__C2 (a b)) b))
+
+@neighbors__C0 = (* (b (a c)))
+  & @List/Cons ~ (a (b c))
+
+@neighbors__C1 = (* ({g a} (e ({b d} i))))
+  & @get_src ~ (a $([=] $(b ?(((c (* c)) @neighbors__C0) (f (h i))))))
+  & @neighbors ~ (d (e f))
+  & @get_dst ~ (g h)
+
+@neighbors__C2 = (?(((* @List/Nil) @neighbors__C1) a) a)
+
+@test_edges = f
+  & @List/Cons ~ (a (e f))
+  & @Edge/E ~ (0 (1 a))
+  & @List/Cons ~ (b (d e))
+  & @Edge/E ~ (0 (3 b))
+  & @List/Cons ~ (c (@List/Nil d))
+  & @Edge/E ~ (1 (2 c))
+
+

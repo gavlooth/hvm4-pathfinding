@@ -1,0 +1,56 @@
+// Contraction Hierarchies in HVM4
+
+// === Accessors ===
+@get_src = λ{#Edge: λsrc.λdst.λw. src}
+@get_dst = λ{#Edge: λsrc.λdst.λw. dst}
+@get_weight = λ{#Edge: λsrc.λdst.λw. w}
+@get_node = λ{#State: λnode.λdist. node}
+@get_dist = λ{#State: λnode.λdist. dist}
+
+// === List Operations ===
+@append = λ{[]: λys.ys; <>: λx.λxs.λys. x <> @append(xs,ys)}
+
+// === Up Neighbors (dst > src only) ===
+@up_nbrs_inner = λnode.λ&head.λ&rest.
+  !&src = @get_src(head);
+  !&dst = @get_dst(head);
+  λ{0: rest; λz. λ{0: rest; λzz. !w = @get_weight(head); #State{dst,w} <> rest}(dst > src)}(src == node)
+
+@up_neighbors = λ&node. λ{[]: []; <>: λ&head.λ&tail. !&rest = @up_neighbors(node,tail); @up_nbrs_inner(node,head,rest)}
+
+// === Add Distance to States ===
+@add_dist = λ&d. λ{[]: []; <>: λ&head.λ&tail. !&n = @get_node(head); !&w = @get_dist(head); #State{n, d + w} <> @add_dist(d,tail)}
+
+// === Search Upward ===
+@search_step = λ&state.λ&rest.λ&edges.λreached.λ&fuel1.
+  !&node = @get_node(state);
+  !&dist = @get_dist(state);
+  !&nbrs = @up_neighbors(node,edges);
+  !&updated = @add_dist(dist,nbrs);
+  !&new_front = @append(rest,updated);
+  !&new_reach = state <> reached;
+  @search_up(new_front,edges,new_reach,fuel1)
+
+@search_up = λfrontier.λ&edges.λ&reached. λ{0: reached; λ&fuel1. λ{[]: reached; <>: λ&state.λ&rest. @search_step(state,rest,edges,reached,fuel1)}(frontier)}
+
+// === Find in Reached ===
+@find_in_reached = λ&node. λ{[]: 999999; <>: λ&head.λ&tail. !&n = @get_node(head); λ{0: @find_in_reached(node,tail); λz. @get_dist(head)}(n == node)}
+
+// === Find Meeting Point ===
+// If bd == 999999 (not found), return rest_min
+// Else if (fd + bd) < rest_min, return fd + bd; else rest_min
+@meeting_check = λ&rest_min.λ&fd.λ&bd. λ{0: λ{0: rest_min; λzz. fd + bd}((fd + bd) < rest_min); λz. rest_min}(bd == 999999)
+
+@find_meeting = λ&bwd. λ{[]: 9999; <>: λ&head.λ&tail. !&rest_min = @find_meeting(bwd,tail); !&n = @get_node(head); !&fd = @get_dist(head); !&bd = @find_in_reached(n,bwd); @meeting_check(rest_min,fd,bd)}
+
+// === CH Query ===
+@ch_query = λ&src.λ&dst.λ&edges.λ&fuel.
+  !&fwdQ = [#State{src,0}];
+  !&bwdQ = [#State{dst,0}];
+  !&fwdR = @search_up(fwdQ,edges,[],fuel);
+  !&bwdR = @search_up(bwdQ,edges,[],fuel);
+  @find_meeting(bwdR,fwdR)
+
+// === Test ===
+@test_edges = [#Edge{0,2,1}, #Edge{1,2,2}, #Edge{2,3,1}, #Edge{1,3,3}]
+@main = @ch_query(0,1,@test_edges,10)

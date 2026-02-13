@@ -1,0 +1,73 @@
+// SUP-based Path Exploration (Bend-style)
+//
+// Uses HVM4 superpositions to explore ALL paths from source to target.
+// Each branching node (degree > 1) creates a SUP with a distinct label.
+// Collapse mode (-C) enumerates every path's total weight.
+//
+// Graph (6 nodes, directed, weighted):
+//   0 -> 1 (w=2), 0 -> 2 (w=5)
+//   1 -> 3 (w=3), 1 -> 4 (w=7)
+//   2 -> 3 (w=1), 2 -> 4 (w=4)
+//   3 -> 5 (w=2)
+//   4 -> 5 (w=1)
+//   5: target
+//
+// All paths from 0 to 5:
+//   0->1->3->5 : 2+3+2 = 7  (shortest)
+//   0->1->4->5 : 2+7+1 = 10
+//   0->2->3->5 : 5+1+2 = 8
+//   0->2->4->5 : 5+4+1 = 10
+//
+// Usage:
+//   HVM4/clang/main src/alg_sup_explore.hvm4 -s     → shows SUP tree
+//   HVM4/clang/main src/alg_sup_explore.hvm4 -C20   → enumerates: 7, 10, 8, 10
+//
+// Pattern: Each SUP label (A, B, C) represents an independent choice point.
+// HVM4's collapse enumerates all combinations of choices (Cartesian product).
+
+// ---- Graph exploration with SUP at branch points ----
+
+@explore = λ{
+  0: &A{2 + @explore(1), 5 + @explore(2)};
+  1: &B{3 + @explore(3), 7 + @explore(4)};
+  2: &C{1 + @explore(3), 4 + @explore(4)};
+  3: 2 + @explore(5);
+  4: 1 + @explore(5);
+  5: 0;
+  λn. 999999
+}
+
+// ---- Depth-bounded version (same graph, prevents infinite exploration) ----
+
+@explore_bounded = λ&node. λ&target. λ&depth.
+  λ{
+    0: λ{0: 0; λk. 999999}(node == target);
+    λd.
+      λ{
+        0: @step(node, target, depth - 1);
+        λk. 0
+      }(node == target)
+  }(depth)
+
+@step = λ&node. λ&target. λ&depth. λ{
+  0: &A{2 + @explore_bounded(1, target, depth),
+        5 + @explore_bounded(2, target, depth)};
+  1: &B{3 + @explore_bounded(3, target, depth),
+        7 + @explore_bounded(4, target, depth)};
+  2: &C{1 + @explore_bounded(3, target, depth),
+        4 + @explore_bounded(4, target, depth)};
+  3: 2 + @explore_bounded(5, target, depth);
+  4: 1 + @explore_bounded(5, target, depth);
+  5: 0;
+  λn. 999999
+}(node)
+
+// ---- Main: SUP exploration ----
+// -s mode: shows SUP tree structure
+// -C20 mode: enumerates all path weights
+
+@main = @explore(0)
+//7
+//10
+//8
+//10

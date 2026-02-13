@@ -1,0 +1,125 @@
+// Boruvka MST (Bend-style)
+//
+// Each component picks minimum outgoing edge simultaneously.
+// Merge components, repeat log(n) times.
+//
+// Graph (4 nodes, undirected, weighted):
+//   0-1: 4, 0-2: 1, 1-2: 2, 1-3: 5, 2-3: 3
+//
+// MST: {0-2:1, 1-2:2, 2-3:3}, total weight = 6
+//
+// Usage: HVM4/clang/main src/alg_boruvka.hvm4 -s
+
+@INF = 999
+
+// ---- List indexing ----
+
+@get = λ&i. λ{
+  []: 0;
+  <>: λ&h. λt. λ{0: h; λk. @get(i - 1, t)}(i)
+}
+
+// ---- Relabel: replace all old_val with new_val in list ----
+
+@relabel = λ&old. λ&new. λ{
+  []: [];
+  <>: λ&h. λt.
+    λ{0: h; λk. new}(h == old) <> @relabel(old, new, t)
+}
+
+// ---- Edge destructure: [u, v, w] → continuation(u, v, w) ----
+// CPS style: consumes edge linearly, no DUP needed.
+
+@edge3 = λ&f. λ{
+  []: f(0, 0, @INF);
+  <>: λ&u. λ{
+    []: f(u, 0, @INF);
+    <>: λ&v. λ{
+      []: f(u, v, @INF);
+      <>: λ&w. λrest. f(u, v, w)
+    }
+  }
+}
+
+// ---- XOR crossing check ----
+// cross = (cu==c) XOR (cv==c) = exactly one endpoint in component c
+// s = (cu==c) + (cv==c): 0→neither, 1→crossing, 2→both
+
+@xor_eq = λa. λb.
+  λ{0: 0; λk. λ{0: 1; λk. 0}(k - 1)}(a + b)
+
+// ---- Find min crossing edge for component c ----
+// Destructures both current edge and best via CPS.
+// All values are numbers after destructuring, so DUP is safe.
+
+@min_cross = λ&comp. λ&c. λ{
+  []: [0, 0, @INF];
+  <>: λ&edge. λrest.
+    ! &best = @min_cross(comp, c, rest);
+    @edge3(λ&u. λ&v. λ&w.
+      ! &cu = @get(u, comp);
+      ! &cv = @get(v, comp);
+      ! &cross = @xor_eq(cu == c, cv == c);
+      @edge3(λ&bu. λ&bv. λ&bw.
+        @pick(cross, w, bw, [u, v, w], [bu, bv, bw])
+      , best)
+    , edge)
+}
+
+@pick = λ&cross. λ&w. λ&bw. λ&edge. λ&best.
+  λ{
+    0: best;
+    λk. λ{0: best; λk. edge}(w < bw)
+  }(cross)
+
+// ---- Find min crossing edges for all n components ----
+
+@all_mins = λ&comp. λ&edges. λ&n. λ&c.
+  λ{
+    0: [];
+    λk. @min_cross(comp, c, edges) <> @all_mins(comp, edges, n - 1, c + 1)
+  }(n)
+
+// ---- Merge: process min-edges, union via relabel, accumulate weight ----
+// After merging an edge, relabel so both endpoints share the same component.
+// If endpoints already same component, skip (dedup).
+
+@merge = λ&comp. λ&total. λ{
+  []: [comp, total];
+  <>: λ&edge. λ&rest.
+    @edge3(λ&u. λ&v. λ&w.
+      ! &cu = @get(u, comp);
+      ! &cv = @get(v, comp);
+      λ{
+        0:
+          ! &nc = @relabel(cv, cu, comp);
+          @merge(nc, total + w, rest);
+        λk. @merge(comp, total, rest)
+      }(cu == cv)
+    , edge)
+}
+
+// ---- One Boruvka round ----
+
+@round = λ&comp. λ&edges. λ&n. λ&total.
+  ! &mins = @all_mins(comp, edges, n, 0);
+  @merge(comp, total, mins)
+
+// ---- Run iters rounds ----
+
+@run = λ&iters. λ&comp. λ&edges. λ&n. λ&total.
+  λ{
+    0: total;
+    λk.
+      ! &state = @round(comp, edges, n, total);
+      λ{<>: λ&nc. λst. λ{<>: λ&nt. λnil.
+        @run(iters - 1, nc, edges, n, nt)
+      }(st)}(state)
+  }(iters)
+
+// ---- Main ----
+
+@edges = [[0, 1, 4], [0, 2, 1], [1, 2, 2], [1, 3, 5], [2, 3, 3]]
+
+@main = @run(2, [0, 1, 2, 3], @edges, 4, 0)
+// Expected: 6 (MST weight: 1 + 2 + 3)
