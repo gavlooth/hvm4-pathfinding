@@ -11,6 +11,10 @@
 
 #include <sys/mman.h>
 #include <stdint.h>
+#include <unistd.h>
+
+// HEAP_CAP is capped at 1<<32 (32 GB) — HVM4 uses u32 for heap locations.
+// This is the hard architectural limit until HVM4 switches to u64 indices.
 
 #include "../../HVM4/clang/hvm4.c"
 
@@ -18,7 +22,19 @@
 // hvm4_lib_init: one-time runtime initialization
 // ---------------------------------------------------------------------------
 void hvm4_lib_init(void) {
-  thread_set_count(1);
+  // Thread count: HVM4_THREADS env var, or all available cores.
+  // Free-list is disabled in multi-threaded mode (cross-thread races),
+  // so memory recycling relies on @compact primitive instead.
+  u32 threads = 0;
+  const char *env = getenv("HVM4_THREADS");
+  if (env && env[0]) {
+    threads = (u32)atoi(env);
+  }
+  if (threads == 0) {
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    threads = ncpu > 0 ? (u32)ncpu : 1;
+  }
+  thread_set_count(threads); // clamps to [1, MAX_THREADS]
   wnf_set_tid(0);
   BOOK  = calloc(BOOK_CAP, sizeof(u32));
   HEAP  = calloc(HEAP_CAP, sizeof(Term));
@@ -66,6 +82,9 @@ void hvm4_lib_reset(void) {
 
   // Reset heap: use madvise to release physical pages without unmapping
   madvise(HEAP, HEAP_CAP * sizeof(Term), MADV_DONTNEED);
+
+  // Reset free lists (stale entries would point to zeroed pages)
+  heap_free_reset();
 
   // Re-initialize heap slices
   heap_init_slices();
@@ -184,11 +203,16 @@ int hvm4_run(const char *source, int collapse_limit, uint32_t *out, int max_out)
   Term main_ref = term_new_ref(main_id);
 
   if (collapse_limit > 0) {
-    // Collapse mode: capture stdout to extract printed numbers
+    // Collapse mode: force single-threaded for stdout→memstream safety.
+    // Worker threads would write to the redirected stdout concurrently,
+    // interleaving partial output lines.
+    u32 saved_threads = thread_get_count();
+    thread_set_count(1);
+
     char *buf = NULL;
     size_t buf_len = 0;
     FILE *memf = open_memstream(&buf, &buf_len);
-    if (!memf) return -1;
+    if (!memf) { thread_set_count(saved_threads); return -1; }
 
     FILE *old_stdout = stdout;
     stdout = memf;
@@ -198,6 +222,7 @@ int hvm4_run(const char *source, int collapse_limit, uint32_t *out, int max_out)
     fflush(memf);
     stdout = old_stdout;
     fclose(memf);
+    thread_set_count(saved_threads);
 
     // Parse numbers from captured output (one per line)
     int count = 0;

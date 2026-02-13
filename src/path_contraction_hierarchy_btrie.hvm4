@@ -1,0 +1,250 @@
+// Contraction Hierarchy shortest-path query using linear binary trie.
+//
+// Same graph and algorithm as path_contraction_hierarchy.hvm4 but replaces
+// O(V) association lists with O(log2(V)) linear binary tries.
+//
+// Graph (6 nodes, ranks 0..5, node id equals rank for simplicity):
+//
+// Upward adjacency (forward edges, only to higher-ranked nodes):
+//   0: [(1, 2), (2, 6)]
+//   1: [(2, 3), (3, 5)]
+//   2: [(4, 4)]
+//   3: [(4, 2), (5, 8)]
+//   4: [(5, 1)]
+//   5: []
+//
+// Backward upward adjacency (reverse edges, going from higher to lower):
+//   5: [(4, 1), (3, 8)]
+//   4: [(2, 4), (3, 2)]
+//   3: [(1, 5)]
+//   2: [(0, 6), (1, 3)]
+//   1: [(0, 2)]
+//   0: []
+//
+// Forward distances from source 0 (processed in rank order 0..5):
+//   dist_fwd[0] = 0
+//   dist_fwd[1] = 2          (0->1)
+//   dist_fwd[2] = 5          (0->1->2: 2+3)
+//   dist_fwd[3] = 7          (0->1->3: 2+5)
+//   dist_fwd[4] = 9          (min(5+4, 7+2) = 9)
+//   dist_fwd[5] = 10         (min(9+1, 7+8) = 10)
+//
+// Backward distances from target 5 (processed in reverse rank order 5..0):
+//   dist_bwd[5] = 0
+//   dist_bwd[4] = 1          (5<-4: 1)
+//   dist_bwd[3] = 3          (5<-4<-3: 1+2)
+//   dist_bwd[2] = 5          (5<-4<-2: 1+4)
+//   dist_bwd[1] = 8          (min(5+3, 3+5) = 8)
+//   dist_bwd[0] = 10         (min(8+2, 5+6) = 10)
+//
+// Meeting: min over all v of dist_fwd[v] + dist_bwd[v]:
+//   v=0: 0+10=10, v=1: 2+8=10, v=2: 5+5=10,
+//   v=3: 7+3=10, v=4: 9+1=10, v=5: 10+0=10
+//
+// Shortest path from 0 to 5 = 10.
+//
+// DEPTH = 3 (ceil(log2(6)) = 3, since 2^3 = 8 >= 6)
+
+// ---- constants ----
+
+@INF = 999999
+@DEPTH = 3
+
+// ---- min ----
+
+@min = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+// ---- linear binary trie functions (inlined) ----
+
+// btrie_get_lin: returns #P{val, rebuilt_trie} — trie consumed and rebuilt
+@btrie_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{@INF, #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_lin_B(bit, next, nd, l, r)
+}
+
+@btrie_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@btrie_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@btrie_get_lin(next, nd, r))
+}
+
+// btrie_get: destructive GET (consumes trie, no rebuild)
+@btrie_get = λ&key. λ&depth. λ{
+  #BE: @INF;
+  #BL: λval. val;
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_B(bit, next, nd, l, r)
+}
+
+@btrie_get_B = λ{
+  0: λnext. λnd. λl. λr. @btrie_get(next, nd, l);
+  λn. λnext. λnd. λl. λr. @btrie_get(next, nd, r)
+}
+
+// btrie_set: linear SET — creates or replaces value at key
+@btrie_set = λ&key. λ&val. λ&depth. λ{
+  #BL: λold. #BL{val};
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_set_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_set_B(bit, next, val, nd, l, r)
+}
+
+@btrie_set_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_set(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_set(next, val, nd, #BE{})}
+}
+
+@btrie_set_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_set(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_set(next, val, nd, r)}
+}
+
+// btrie_min_update: set key to val only if val < current
+@btrie_min_update = λ&key. λ&val. λ&depth. λ{
+  #BL: λ&old. λ{0: #BL{old}; λn. #BL{val}}(val < old);
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_mu_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_mu_B(bit, next, val, nd, l, r)
+}
+
+@btrie_mu_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_min_update(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_min_update(next, val, nd, #BE{})}
+}
+
+@btrie_mu_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_min_update(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_min_update(next, val, nd, r)}
+}
+
+// ---- forward adjacency: upward edges per node ----
+
+@fwd_adj = λ{
+  0: [#E{1, 2}, #E{2, 6}];
+  1: [#E{2, 3}, #E{3, 5}];
+  2: [#E{4, 4}];
+  3: [#E{4, 2}, #E{5, 8}];
+  4: [#E{5, 1}];
+  λn. []
+}
+
+// ---- backward adjacency: reverse upward edges per node ----
+
+@bwd_adj = λ{
+  5: [#E{4, 1}, #E{3, 8}];
+  4: [#E{2, 4}, #E{3, 2}];
+  3: [#E{1, 5}];
+  2: [#E{0, 6}, #E{1, 3}];
+  1: [#E{0, 2}];
+  λn. []
+}
+
+// ---- foldl_lin: linear fold threading accumulator ----
+
+@foldl_lin = λf. λacc. λlist. @foldl_go(list, f, acc)
+
+@foldl_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_go(t, f, f(acc, h))
+}
+
+// ---- relax_edges_lin: fold over edge list, threading dist trie linearly ----
+// Given src_d (distance to source node) and edge list, relax each edge.
+// Uses btrie_get_lin to read old distance, btrie_min_update to write new.
+
+@relax_edges_lin = λ&src_d. λdist. λedges. @relax_edges_go(edges, src_d, dist)
+
+@relax_edges_go = λ{
+  []: λsrc_d. λdist. dist;
+  <>: λh. λt. λ&src_d. λdist.
+    λ{#E: λ&tgt. λw.
+      ! &new_d = src_d + w;
+      λ{#P: λ&old_d. λdist2.
+        @relax_cmp(new_d < old_d, tgt, new_d, dist2, src_d, t)
+      }(@btrie_get_lin(tgt, @DEPTH, dist))
+    }(h)
+}
+
+// Helper: comparison branch to avoid dist crossing match arms
+@relax_cmp = λ{
+  0: λtgt. λnew_d. λdist. λsrc_d. λt. @relax_edges_go(t, src_d, dist);
+  λn. λtgt. λnew_d. λdist. λsrc_d. λt. @relax_edges_go(t, src_d, @btrie_min_update(tgt, new_d, @DEPTH, dist))
+}
+
+// ---- process_node_lin: get dist[node] linearly, if not INF relax edges ----
+
+@process_node_lin = λ&adj_fn. λdist. λ&node.
+  λ{#P: λ&d. λdist2.
+    @process_cond(d == @INF, adj_fn, d, dist2, node)
+  }(@btrie_get_lin(node, @DEPTH, dist))
+
+// Helper: d==INF branch — if INF, skip; otherwise relax edges
+@process_cond = λ{
+  0: λadj_fn. λd. λdist. λnode. @relax_edges_lin(d, dist, adj_fn(node));
+  λn. λadj_fn. λd. λdist. λnode. dist
+}
+
+// ---- forward pass: process nodes in rank order [0, 1, 2, 3, 4, 5] ----
+
+@fwd_nodes = [0, 1, 2, 3, 4, 5]
+
+@init_fwd = @btrie_set(0, 0, @DEPTH, #BE{})
+
+@fwd_dist = @foldl_lin(λdist. λnode. @process_node_lin(@fwd_adj, dist, node), @init_fwd, @fwd_nodes)
+
+// ---- backward pass: process nodes in reverse rank order [5, 4, 3, 2, 1, 0] ----
+
+@bwd_nodes = [5, 4, 3, 2, 1, 0]
+
+@init_bwd = @btrie_set(5, 0, @DEPTH, #BE{})
+
+@bwd_dist = @foldl_lin(λdist. λnode. @process_node_lin(@bwd_adj, dist, node), @init_bwd, @bwd_nodes)
+
+// ---- meet: min over all nodes v of fwd_dist[v] + bwd_dist[v] ----
+// Thread BOTH fwd and bwd tries linearly through the fold.
+
+@all_nodes = [0, 1, 2, 3, 4, 5]
+
+@meet_fold = λ{
+  []: λfd. λbd. λbest. best;
+  <>: λ&v. λt. λfd. λbd. λ&best.
+    λ{#P: λ&df. λfd2.
+      λ{#P: λ&db. λbd2.
+        @meet_fold(t, fd2, bd2, @min(best, df + db))
+      }(@btrie_get_lin(v, @DEPTH, bd))
+    }(@btrie_get_lin(v, @DEPTH, fd))
+}
+
+@meet = λfd. λbd. @meet_fold(@all_nodes, fd, bd, @INF)
+
+@main = @meet(@fwd_dist, @bwd_dist)
+//10

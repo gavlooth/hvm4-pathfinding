@@ -1,0 +1,276 @@
+// Dijkstra SSSP — linear binary trie + leftist heap PQ — V=50, E=200, depth=6
+// Expected: dist[49] = 30
+
+@INF = 999999
+@DEPTH = 6
+
+@btrie_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{@INF, #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_lin_B(bit, next, nd, l, r)
+}
+
+@btrie_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@btrie_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@btrie_get_lin(next, nd, r))
+}
+
+@btrie_get = λ&key. λ&depth. λ{
+  #BE: @INF;
+  #BL: λval. val;
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_B(bit, next, nd, l, r)
+}
+
+@btrie_get_B = λ{
+  0: λnext. λnd. λl. λr. @btrie_get(next, nd, l);
+  λn. λnext. λnd. λl. λr. @btrie_get(next, nd, r)
+}
+
+@btrie_set = λ&key. λ&val. λ&depth. λ{
+  #BL: λold. #BL{val};
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_set_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_set_B(bit, next, val, nd, l, r)
+}
+
+@btrie_set_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_set(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_set(next, val, nd, #BE{})}
+}
+
+@btrie_set_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_set(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_set(next, val, nd, r)}
+}
+
+@btrie_min_update = λ&key. λ&val. λ&depth. λ{
+  #BL: λ&old. λ{0: #BL{old}; λn. #BL{val}}(val < old);
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_mu_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_mu_B(bit, next, val, nd, l, r)
+}
+
+@btrie_mu_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_min_update(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_min_update(next, val, nd, #BE{})}
+}
+
+@btrie_mu_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_min_update(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_min_update(next, val, nd, r)}
+}
+
+
+@pq_empty = #PQE{}
+
+@pq_rank = λ{
+  #PQE: 0;
+  #PQN: λp.λv.λl.λr.λk. k
+}
+
+@pq_make = λ&prio.λ&val.λ&left.λ&right.
+  ! &lr = @pq_rank(left)
+  ! &rr = @pq_rank(right)
+  λ{0:
+    #PQN{prio, val, right, left, lr + 1};
+  λn.
+    #PQN{prio, val, left, right, rr + 1}
+  }(lr >= rr)
+
+@pq_merge = λ{
+  #PQE: λb. b;
+  #PQN: λ&ap.λ&av.λ&al.λ&ar.λ&ak. λ{
+    #PQE: #PQN{ap, av, al, ar, ak};
+    #PQN: λ&bp.λ&bv.λ&bl.λ&br.λ&bk.
+      λ{0:
+        @pq_make(bp, bv, bl, @pq_merge(#PQN{ap, av, al, ar, ak}, br));
+      λn.
+        @pq_make(ap, av, al, @pq_merge(ar, #PQN{bp, bv, bl, br, bk}))
+      }(ap <= bp)
+  }
+}
+
+@pq_insert = λprio.λval.λheap.
+  @pq_merge(#PQN{prio, val, #PQE{}, #PQE{}, 1}, heap)
+
+@pq_pop = λ{
+  #PQE: #PQE{};
+  #PQN: λp.λv.λl.λr.λk. #R{p, v, @pq_merge(l, r)}
+}
+
+
+@adj_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{[], #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @adj_get_lin_B(bit, next, nd, l, r)
+}
+
+@adj_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@adj_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@adj_get_lin(next, nd, r))
+}
+
+
+@dijkstra = λ{
+  #DS: λadj. λdist. λpq.
+    @dijk_pop(@pq_pop(pq), adj, dist)
+}
+
+@dijk_pop = λ{
+  #PQE: λadj. λdist. #DS{adj, dist, @pq_empty};
+  #R: λd. λu. λrest. λadj. λdist.
+    @dijk_check(adj, dist, rest, d, u)
+}
+
+@dijk_check = λadj. λdist. λpq. λ&d. λ&u.
+  λ{#P: λ&du. λdist2.
+    @dijk_stale(d > du, adj, dist2, pq, d, u)
+  }(@btrie_get_lin(u, @DEPTH, dist))
+
+@dijk_stale = λ{
+  0: λadj. λdist. λpq. λd. λu.
+    @dijk_process(adj, dist, pq, d, u);
+  λn. λadj. λdist. λpq. λd. λu.
+    @dijkstra(#DS{adj, dist, pq})
+}
+
+@dijk_process = λadj. λdist. λpq. λ&d. λu.
+  λ{#P: λneighbors. λadj2.
+    @dijk_relax_then_recurse(adj2, dist, pq, d, neighbors)
+  }(@adj_get_lin(u, @DEPTH, adj))
+
+@dijk_relax_then_recurse = λadj. λdist. λpq. λd. λneighbors.
+  λ{#DS2: λdist2. λpq2.
+    @dijkstra(#DS{adj, dist2, pq2})
+  }(@relax_all(d, neighbors, dist, pq))
+
+@relax_all = λd. λneighbors. λdist. λpq.
+  @relax_fold(neighbors, d, dist, pq)
+
+@relax_fold = λ{
+  []: λd. λdist. λpq. #DS2{dist, pq};
+  <>: λh. λt. λ&d. λdist. λpq.
+    λ{#P: λ&v. λ&w.
+      @relax_one_then_continue(t, d, v, d + w, dist, pq)
+    }(h)
+}
+
+@relax_one_then_continue = λt. λd. λ&v. λ&new_d. λdist. λpq.
+  λ{#P: λ&dv. λdist2.
+    @relax_decide(new_d < dv, t, d, v, new_d, dv, dist2, pq)
+  }(@btrie_get_lin(v, @DEPTH, dist))
+
+@relax_decide = λ{
+  0: λt. λd. λv. λnew_d. λdv. λdist. λpq.
+    @relax_fold(t, d, dist, pq);
+  λn. λt. λd. λ&v. λ&new_d. λdv. λdist. λpq.
+    ! dist2 = @btrie_set(v, new_d, @DEPTH, dist);
+    ! pq2 = @pq_insert(new_d, v, pq);
+    @relax_fold(t, d, dist2, pq2)
+}
+
+// ===== adjacency trie =====
+
+@adj_trie =
+  @btrie_set(0, [#P{1,10}, #P{17,15}, #P{33,9}, #P{31,13}], @DEPTH,
+  @btrie_set(1, [#P{2,7}, #P{4,14}, #P{24,2}, #P{28,20}], @DEPTH,
+  @btrie_set(2, [#P{3,4}, #P{43,17}, #P{29,19}, #P{25,19}, #P{13,9}, #P{33,13}, #P{37,5}], @DEPTH,
+  @btrie_set(3, [#P{4,3}, #P{38,4}, #P{8,6}], @DEPTH,
+  @btrie_set(4, [#P{5,10}, #P{39,15}, #P{33,13}], @DEPTH,
+  @btrie_set(5, [#P{6,7}, #P{30,10}, #P{42,12}], @DEPTH,
+  @btrie_set(6, [#P{7,6}, #P{29,15}, #P{19,3}, #P{21,19}], @DEPTH,
+  @btrie_set(7, [#P{8,1}, #P{26,16}, #P{24,2}, #P{22,12}], @DEPTH,
+  @btrie_set(8, [#P{9,2}, #P{39,9}, #P{7,13}, #P{23,3}, #P{19,3}], @DEPTH,
+  @btrie_set(9, [#P{10,1}, #P{18,18}, #P{40,2}, #P{26,6}], @DEPTH,
+  @btrie_set(10, [#P{11,6}, #P{37,7}, #P{15,1}, #P{43,3}], @DEPTH,
+  @btrie_set(11, [#P{12,9}, #P{10,20}, #P{20,10}, #P{22,8}, #P{48,8}, #P{18,18}], @DEPTH,
+  @btrie_set(12, [#P{13,4}, #P{41,11}, #P{17,5}, #P{45,19}, #P{21,15}, #P{35,1}], @DEPTH,
+  @btrie_set(13, [#P{14,3}, #P{44,4}], @DEPTH,
+  @btrie_set(14, [#P{15,8}], @DEPTH,
+  @btrie_set(15, [#P{16,9}, #P{24,16}, #P{20,8}, #P{32,8}, #P{2,18}], @DEPTH,
+  @btrie_set(16, [#P{17,8}, #P{5,7}, #P{33,13}, #P{47,11}, #P{19,5}], @DEPTH,
+  @btrie_set(17, [#P{18,5}, #P{48,8}, #P{16,20}, #P{26,16}], @DEPTH,
+  @btrie_set(18, [#P{19,4}, #P{3,17}, #P{41,19}, #P{35,19}, #P{45,17}], @DEPTH,
+  @btrie_set(19, [#P{20,3}, #P{38,4}, #P{0,14}, #P{48,14}, #P{18,12}], @DEPTH,
+  @btrie_set(20, [#P{21,10}, #P{17,17}, #P{19,3}, #P{41,1}, #P{29,13}, #P{49,19}], @DEPTH,
+  @btrie_set(21, [#P{22,1}, #P{10,20}, #P{12,6}, #P{42,20}, #P{26,10}, #P{44,8}, #P{18,16}], @DEPTH,
+  @btrie_set(22, [#P{23,6}, #P{15,17}, #P{7,3}, #P{21,7}, #P{17,11}, #P{37,15}], @DEPTH,
+  @btrie_set(23, [#P{24,5}, #P{12,18}], @DEPTH,
+  @btrie_set(24, [#P{25,8}, #P{43,17}], @DEPTH,
+  @btrie_set(25, [#P{26,9}, #P{2,10}, #P{4,10}], @DEPTH,
+  @btrie_set(26, [#P{27,6}, #P{5,9}], @DEPTH,
+  @btrie_set(27, [#P{28,1}, #P{22,8}, #P{16,6}, #P{30,16}, #P{4,4}, #P{12,4}], @DEPTH,
+  @btrie_set(28, [#P{29,4}], @DEPTH,
+  @btrie_set(29, [#P{30,9}, #P{22,6}, #P{40,20}], @DEPTH,
+  @btrie_set(30, [#P{31,8}, #P{45,9}, #P{49,5}, #P{37,1}], @DEPTH,
+  @btrie_set(31, [#P{32,9}, #P{10,4}, #P{34,18}, #P{26,2}], @DEPTH,
+  @btrie_set(32, [#P{33,2}, #P{7,5}, #P{47,15}, #P{21,3}], @DEPTH,
+  @btrie_set(33, [#P{34,1}, #P{40,2}, #P{18,20}, #P{10,10}], @DEPTH,
+  @btrie_set(34, [#P{35,2}, #P{39,9}, #P{7,15}, #P{23,13}, #P{17,19}], @DEPTH,
+  @btrie_set(35, [#P{36,9}, #P{14,18}, #P{48,8}, #P{10,10}, #P{32,16}], @DEPTH,
+  @btrie_set(36, [#P{37,2}, #P{27,7}], @DEPTH,
+  @btrie_set(37, [#P{38,7}, #P{36,18}, #P{44,4}, #P{22,4}], @DEPTH,
+  @btrie_set(38, [#P{39,4}, #P{23,11}], @DEPTH,
+  @btrie_set(39, [#P{40,9}, #P{0,4}, #P{4,16}], @DEPTH,
+  @btrie_set(40, [#P{41,10}, #P{19,7}, #P{25,3}, #P{15,9}, #P{45,17}, #P{31,19}, #P{11,5}], @DEPTH,
+  @btrie_set(41, [#P{42,5}, #P{32,10}, #P{8,10}], @DEPTH,
+  @btrie_set(42, [#P{43,10}, #P{9,7}], @DEPTH,
+  @btrie_set(43, [#P{44,1}, #P{10,2}, #P{30,12}, #P{46,6}], @DEPTH,
+  @btrie_set(44, [#P{45,8}, #P{33,19}, #P{13,11}, #P{35,17}], @DEPTH,
+  @btrie_set(45, [#P{46,9}, #P{26,18}, #P{42,18}, #P{38,10}, #P{24,14}], @DEPTH,
+  @btrie_set(46, [#P{47,8}, #P{3,5}, #P{23,11}], @DEPTH,
+  @btrie_set(47, [#P{48,3}, #P{2,4}, #P{46,2}], @DEPTH,
+  @btrie_set(48, [#P{49,10}, #P{1,19}, #P{19,1}, #P{25,11}, #P{7,1}, #P{39,13}, #P{27,17}], @DEPTH,
+  @btrie_set(49, [#P{12,6}, #P{38,12}, #P{48,20}], @DEPTH,
+  #BE{}))))))))))))))))))))))))))))))))))))))))))))))))))
+
+// ===== init and run =====
+
+@init_dist = @btrie_set(0, 0, @DEPTH, #BE{})
+@init_pq = @pq_insert(0, 0, @pq_empty)
+@init = #DS{@adj_trie, @init_dist, @init_pq}
+
+@result = @dijkstra(@init)
+
+@extract = λ{#DS: λadj. λdist. λpq.
+  @btrie_get(49, @DEPTH, dist)
+}
+
+@main = @extract(@result)
+//30

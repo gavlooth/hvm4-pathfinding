@@ -1,0 +1,289 @@
+// Bellman-Ford SSSP — radix-4 trie + adjacency list + early termination — V=50, E=200, depth=3
+// Adjacency list: 50 source nodes (V get_lin calls per round instead of E=200)
+// Expected: dist[49] = 30
+
+@INF = 999999
+@DEPTH = 3
+
+@q4_get_lin = λ&key. λ&depth. λ{
+  #QE: #P{@INF, #QE{}};
+  #QL: λ&val. #P{val, #QL{val}};
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_get_lin_Q(slot, next, nd, c0, c1, c2, c3)
+}
+
+@q4_get_lin_Q = λ{
+  0: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c0. #P{val, #Q{new_c0, c1, c2, c3}}}(@q4_get_lin(next, nd, c0));
+  1: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c1. #P{val, #Q{c0, new_c1, c2, c3}}}(@q4_get_lin(next, nd, c1));
+  2: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c2. #P{val, #Q{c0, c1, new_c2, c3}}}(@q4_get_lin(next, nd, c2));
+  λn. λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c3. #P{val, #Q{c0, c1, c2, new_c3}}}(@q4_get_lin(next, nd, c3))
+}
+
+@q4_get = λ&key. λ&depth. λ{
+  #QE: @INF;
+  #QL: λval. val;
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_get_Q(slot, next, nd, c0, c1, c2, c3)
+}
+
+@q4_get_Q = λ{
+  0: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c0);
+  1: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c1);
+  2: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c2);
+  λn. λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c3)
+}
+
+@q4_set = λ&key. λ&val. λ&depth. λ{
+  #QL: λold. #QL{val};
+  #QE: λ{
+    0: #QL{val};
+    λn.
+      ! slot = key % 4;
+      ! next = key / 4;
+      ! nd = depth - 1;
+      @q4_set_QE(slot, next, val, nd)
+  }(depth);
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_set_Q(slot, next, val, nd, c0, c1, c2, c3)
+}
+
+@q4_set_QE = λ{
+  0: λnext. λval. λnd. #Q{@q4_set(next, val, nd, #QE{}), #QE{}, #QE{}, #QE{}};
+  1: λnext. λval. λnd. #Q{#QE{}, @q4_set(next, val, nd, #QE{}), #QE{}, #QE{}};
+  2: λnext. λval. λnd. #Q{#QE{}, #QE{}, @q4_set(next, val, nd, #QE{}), #QE{}};
+  λn. λnext. λval. λnd. #Q{#QE{}, #QE{}, #QE{}, @q4_set(next, val, nd, #QE{})}
+}
+
+@q4_set_Q = λ{
+  0: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{@q4_set(next, val, nd, c0), c1, c2, c3};
+  1: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, @q4_set(next, val, nd, c1), c2, c3};
+  2: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, c1, @q4_set(next, val, nd, c2), c3};
+  λn. λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, c1, c2, @q4_set(next, val, nd, c3)}
+}
+
+@q4_min_update_f = λ&key. λ&val. λ&depth. λ{
+  #QL: λ&old. λ{0: #P{#QL{old}, 0}; λn. #P{#QL{val}, 1}}(val < old);
+  #QE: λ{
+    0: #P{#QL{val}, 1};
+    λn.
+      ! slot = key % 4;
+      ! next = key / 4;
+      ! nd = depth - 1;
+      @q4_muf_QE(slot, next, val, nd)
+  }(depth);
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_muf_Q(slot, next, val, nd, c0, c1, c2, c3)
+}
+
+@q4_muf_QE = λ{
+  0: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{child, #QE{}, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  1: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, child, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  2: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, #QE{}, child, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  λn. λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, #QE{}, #QE{}, child}, c}}(@q4_min_update_f(next, val, nd, #QE{}))
+}
+
+@q4_muf_Q = λ{
+  0: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c0. λc. #P{#Q{new_c0, c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c0));
+  1: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c1. λc. #P{#Q{c0, new_c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c1));
+  2: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c2. λc. #P{#Q{c0, c1, new_c2, c3}, c}}(@q4_min_update_f(next, val, nd, c2));
+  λn. λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c3. λc. #P{#Q{c0, c1, c2, new_c3}, c}}(@q4_min_update_f(next, val, nd, c3))
+}
+
+
+@adj = [
+  #N{0, [
+    #E2{1,10}, #E2{17,15}, #E2{33,9}, #E2{31,13}]},
+  #N{1, [
+    #E2{2,7}, #E2{4,14}, #E2{24,2}, #E2{28,20}]},
+  #N{2, [
+    #E2{3,4}, #E2{43,17}, #E2{29,19}, #E2{25,19}, #E2{13,9}, #E2{33,13}, #E2{37,5}]},
+  #N{3, [
+    #E2{4,3}, #E2{38,4}, #E2{8,6}]},
+  #N{4, [
+    #E2{5,10}, #E2{39,15}, #E2{33,13}]},
+  #N{5, [
+    #E2{6,7}, #E2{30,10}, #E2{42,12}]},
+  #N{6, [
+    #E2{7,6}, #E2{29,15}, #E2{19,3}, #E2{21,19}]},
+  #N{7, [
+    #E2{8,1}, #E2{26,16}, #E2{24,2}, #E2{22,12}]},
+  #N{8, [
+    #E2{9,2}, #E2{39,9}, #E2{7,13}, #E2{23,3}, #E2{19,3}]},
+  #N{9, [
+    #E2{10,1}, #E2{18,18}, #E2{40,2}, #E2{26,6}]},
+  #N{10, [
+    #E2{11,6}, #E2{37,7}, #E2{15,1}, #E2{43,3}]},
+  #N{11, [
+    #E2{12,9}, #E2{10,20}, #E2{20,10}, #E2{22,8}, #E2{48,8}, #E2{18,18}]},
+  #N{12, [
+    #E2{13,4}, #E2{41,11}, #E2{17,5}, #E2{45,19}, #E2{21,15}, #E2{35,1}]},
+  #N{13, [
+    #E2{14,3}, #E2{44,4}]},
+  #N{14, [
+    #E2{15,8}]},
+  #N{15, [
+    #E2{16,9}, #E2{24,16}, #E2{20,8}, #E2{32,8}, #E2{2,18}]},
+  #N{16, [
+    #E2{17,8}, #E2{5,7}, #E2{33,13}, #E2{47,11}, #E2{19,5}]},
+  #N{17, [
+    #E2{18,5}, #E2{48,8}, #E2{16,20}, #E2{26,16}]},
+  #N{18, [
+    #E2{19,4}, #E2{3,17}, #E2{41,19}, #E2{35,19}, #E2{45,17}]},
+  #N{19, [
+    #E2{20,3}, #E2{38,4}, #E2{0,14}, #E2{48,14}, #E2{18,12}]},
+  #N{20, [
+    #E2{21,10}, #E2{17,17}, #E2{19,3}, #E2{41,1}, #E2{29,13}, #E2{49,19}]},
+  #N{21, [
+    #E2{22,1}, #E2{10,20}, #E2{12,6}, #E2{42,20}, #E2{26,10}, #E2{44,8}, #E2{18,16}]},
+  #N{22, [
+    #E2{23,6}, #E2{15,17}, #E2{7,3}, #E2{21,7}, #E2{17,11}, #E2{37,15}]},
+  #N{23, [
+    #E2{24,5}, #E2{12,18}]},
+  #N{24, [
+    #E2{25,8}, #E2{43,17}]},
+  #N{25, [
+    #E2{26,9}, #E2{2,10}, #E2{4,10}]},
+  #N{26, [
+    #E2{27,6}, #E2{5,9}]},
+  #N{27, [
+    #E2{28,1}, #E2{22,8}, #E2{16,6}, #E2{30,16}, #E2{4,4}, #E2{12,4}]},
+  #N{28, [
+    #E2{29,4}]},
+  #N{29, [
+    #E2{30,9}, #E2{22,6}, #E2{40,20}]},
+  #N{30, [
+    #E2{31,8}, #E2{45,9}, #E2{49,5}, #E2{37,1}]},
+  #N{31, [
+    #E2{32,9}, #E2{10,4}, #E2{34,18}, #E2{26,2}]},
+  #N{32, [
+    #E2{33,2}, #E2{7,5}, #E2{47,15}, #E2{21,3}]},
+  #N{33, [
+    #E2{34,1}, #E2{40,2}, #E2{18,20}, #E2{10,10}]},
+  #N{34, [
+    #E2{35,2}, #E2{39,9}, #E2{7,15}, #E2{23,13}, #E2{17,19}]},
+  #N{35, [
+    #E2{36,9}, #E2{14,18}, #E2{48,8}, #E2{10,10}, #E2{32,16}]},
+  #N{36, [
+    #E2{37,2}, #E2{27,7}]},
+  #N{37, [
+    #E2{38,7}, #E2{36,18}, #E2{44,4}, #E2{22,4}]},
+  #N{38, [
+    #E2{39,4}, #E2{23,11}]},
+  #N{39, [
+    #E2{40,9}, #E2{0,4}, #E2{4,16}]},
+  #N{40, [
+    #E2{41,10}, #E2{19,7}, #E2{25,3}, #E2{15,9}, #E2{45,17}, #E2{31,19}, #E2{11,5}]},
+  #N{41, [
+    #E2{42,5}, #E2{32,10}, #E2{8,10}]},
+  #N{42, [
+    #E2{43,10}, #E2{9,7}]},
+  #N{43, [
+    #E2{44,1}, #E2{10,2}, #E2{30,12}, #E2{46,6}]},
+  #N{44, [
+    #E2{45,8}, #E2{33,19}, #E2{13,11}, #E2{35,17}]},
+  #N{45, [
+    #E2{46,9}, #E2{26,18}, #E2{42,18}, #E2{38,10}, #E2{24,14}]},
+  #N{46, [
+    #E2{47,8}, #E2{3,5}, #E2{23,11}]},
+  #N{47, [
+    #E2{48,3}, #E2{2,4}, #E2{46,2}]},
+  #N{48, [
+    #E2{49,10}, #E2{1,19}, #E2{19,1}, #E2{25,11}, #E2{7,1}, #E2{39,13}, #E2{27,17}]},
+  #N{49, [
+    #E2{12,6}, #E2{38,12}, #E2{48,20}]}]
+
+@relax_node_et = λ{
+  #S: λdist. λ&changed. λ{
+    #N: λu. λout.
+      λ{#P: λ&du. λdist2.
+        @relax_node_go(du < @INF, du, out, dist2, changed)
+      }(@q4_get_lin(u, @DEPTH, dist))
+  }
+}
+
+@relax_node_go = λ{
+  0: λdu. λout. λdist. λchanged. #S{dist, changed};
+  λn. λ&du. λout. λdist. λchanged.
+    @foldl_inner(@relax_out(du), #S{dist, changed}, out)
+}
+
+@relax_out = λ&du. λ{
+  #S: λdist. λ&changed. λ{
+    #E2: λv. λw.
+      ! new_d = du + w;
+      λ{#P: λnew_dist. λc. #S{new_dist, changed + c}}(@q4_min_update_f(v, new_d, @DEPTH, dist))
+  }
+}
+
+@foldl_inner = λf. λacc. λlist. @foldl_inner_go(list, f, acc)
+
+@foldl_inner_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_inner_go(t, f, f(acc, h))
+}
+
+@foldl_et = λf. λacc. λlist. @foldl_et_go(list, f, acc)
+
+@foldl_et_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_et_go(t, f, f(acc, h))
+}
+
+@relax_round_et = λ{
+  #S: λdist. λold_changed.
+    @foldl_et(@relax_node_et, #S{dist, 0}, @adj)
+}
+
+@repeat_until = λf. λx. λn. @repeat_until_go(n, f, x)
+
+@repeat_until_go = λ{
+  0: λf. λx. x;
+  λn. λ&f. λstate.
+    @check_continue(n, f, f(state))
+}
+
+@check_continue = λ&n. λ&f. λ{
+  #S: λdist. λchanged.
+    @check_go(changed, n, f, dist)
+}
+
+@check_go = λ{
+  0: λn. λf. λdist. #S{dist, 0};
+  λm. λn. λf. λdist. @repeat_until_go(n - 1, f, #S{dist, 1})
+}
+
+@init_dist = @q4_set(0, 0, @DEPTH, #QE{})
+@init_state = #S{@init_dist, 1}
+
+@bf = @repeat_until(@relax_round_et, @init_state, 49)
+
+@extract = λ{#S: λdist. λc.
+  @q4_get(49, @DEPTH, dist)
+}
+
+@main = @extract(@bf)
+//30

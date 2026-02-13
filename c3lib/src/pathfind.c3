@@ -91,6 +91,76 @@ fn uint ceil_log2(uint n) {
 }
 
 // ============================================================
+// Helper: compute ceil(log16(n)) for radix-16 trie depth
+// ============================================================
+
+fn uint ceil_log16(uint n) {
+    if (n <= 16) return 1;
+    uint depth = 1;
+    uint cap = 16;
+    while (cap < n) {
+        depth++;
+        cap *= 16;
+    }
+    return depth;
+}
+
+// ============================================================
+// Helper: emit radix-16 trie definitions (trie_get/set/set_slot)
+// ============================================================
+
+fn void emit_trie_defs(DStr* ds) {
+    // trie_get: O(log16(V)) lookup, returns @INF for missing keys
+    ds.append_string("@trie_get = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{#HE: @INF; #HL: \xce\xbbval. val; #H: \xce\xbbc0.\xce\xbbc1.\xce\xbbc2.\xce\xbbc3.\xce\xbbc4.\xce\xbbc5.\xce\xbbc6.\xce\xbbc7.\xce\xbbc8.\xce\xbbc9.\xce\xbbc10.\xce\xbbc11.\xce\xbbc12.\xce\xbbc13.\xce\xbbc14.\xce\xbbc15.");
+    ds.append_string(" ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1;");
+    ds.append_string(" \xce\xbb{0: @trie_get(next,nd,c0); 1: @trie_get(next,nd,c1); 2: @trie_get(next,nd,c2); 3: @trie_get(next,nd,c3);");
+    ds.append_string(" 4: @trie_get(next,nd,c4); 5: @trie_get(next,nd,c5); 6: @trie_get(next,nd,c6); 7: @trie_get(next,nd,c7);");
+    ds.append_string(" 8: @trie_get(next,nd,c8); 9: @trie_get(next,nd,c9); 10: @trie_get(next,nd,c10); 11: @trie_get(next,nd,c11);");
+    ds.append_string(" 12: @trie_get(next,nd,c12); 13: @trie_get(next,nd,c13); 14: @trie_get(next,nd,c14); \xce\xbbn. @trie_get(next,nd,c15)}(slot)}\n");
+
+    // trie_set: O(log16(V)) insert/update
+    ds.append_string("@trie_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{#HL: \xce\xbbold. #HL{val};");
+    ds.append_string(" #HE: \xce\xbb{0: #HL{val}; \xce\xbbn. ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1; ! &leaf = @trie_set(next, val, nd, #HE{}); @trie_set_slot(slot, leaf)}(depth);");
+    ds.append_string(" #H: \xce\xbb&c0.\xce\xbb&c1.\xce\xbb&c2.\xce\xbb&c3.\xce\xbb&c4.\xce\xbb&c5.\xce\xbb&c6.\xce\xbb&c7.\xce\xbb&c8.\xce\xbb&c9.\xce\xbb&c10.\xce\xbb&c11.\xce\xbb&c12.\xce\xbb&c13.\xce\xbb&c14.\xce\xbb&c15.");
+    ds.append_string(" ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1;");
+    ds.append_string(" \xce\xbb{0: #H{@trie_set(next,val,nd,c0),c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 1: #H{c0,@trie_set(next,val,nd,c1),c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 2: #H{c0,c1,@trie_set(next,val,nd,c2),c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 3: #H{c0,c1,c2,@trie_set(next,val,nd,c3),c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 4: #H{c0,c1,c2,c3,@trie_set(next,val,nd,c4),c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 5: #H{c0,c1,c2,c3,c4,@trie_set(next,val,nd,c5),c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 6: #H{c0,c1,c2,c3,c4,c5,@trie_set(next,val,nd,c6),c7,c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 7: #H{c0,c1,c2,c3,c4,c5,c6,@trie_set(next,val,nd,c7),c8,c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 8: #H{c0,c1,c2,c3,c4,c5,c6,c7,@trie_set(next,val,nd,c8),c9,c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 9: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,@trie_set(next,val,nd,c9),c10,c11,c12,c13,c14,c15};");
+    ds.append_string(" 10: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,@trie_set(next,val,nd,c10),c11,c12,c13,c14,c15};");
+    ds.append_string(" 11: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,@trie_set(next,val,nd,c11),c12,c13,c14,c15};");
+    ds.append_string(" 12: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,@trie_set(next,val,nd,c12),c13,c14,c15};");
+    ds.append_string(" 13: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,@trie_set(next,val,nd,c13),c14,c15};");
+    ds.append_string(" 14: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,@trie_set(next,val,nd,c14),c15};");
+    ds.append_string(" \xce\xbbn. #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,@trie_set(next,val,nd,c15)}}(slot)}\n");
+
+    // trie_set_slot: create fresh 16-way branch with one child set
+    ds.append_string("@trie_set_slot = \xce\xbb&slot. \xce\xbb&child. \xce\xbb{");
+    ds.append_string("0: #H{child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("1: #H{#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("2: #H{#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("3: #H{#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("4: #H{#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("5: #H{#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("6: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("7: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("8: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("9: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("10: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("11: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{}}; ");
+    ds.append_string("12: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{}}; ");
+    ds.append_string("13: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{}}; ");
+    ds.append_string("14: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{}}; ");
+    ds.append_string("\xce\xbbn. #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child}}(slot)\n");
+}
+
+// ============================================================
 // 1. Bellman-Ford SSSP
 //    Generates HVM4 source with assoc-list helpers and edge
 //    relaxation, calls hvm4_run(), extracts results.
@@ -105,14 +175,18 @@ fn uint[]? bellman_ford(Graph* g, uint source) {
     DStr ds = new_dstr();
     defer ds.free();
 
+    uint depth = ceil_log16(n);
+
     // --- Constants ---
     ds.append_string("@INF = 999999\n");
+    ds.appendf("@DEPTH = %d\n", depth);
 
-    // --- Helpers (matching path_bellman_ford.hvm4 exactly) ---
-    ds.append_string("@assoc_get = \xce\xbb&key. \xce\xbb&def. \xce\xbb{[]: def; <>: \xce\xbb&h. \xce\xbbt. \xce\xbb{#KV: \xce\xbb&k. \xce\xbbv. \xce\xbb{0: @assoc_get(key, def, t); \xce\xbbn. v}(k == key)}(h)}\n");
-    ds.append_string("@assoc_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb{[]: [#KV{key, val}]; <>: \xce\xbb&h. \xce\xbb&t. \xce\xbb{#KV: \xce\xbb&k. \xce\xbb&v. \xce\xbb{0: #KV{k, v} <> @assoc_set(key, val, t); \xce\xbbn. #KV{k, val} <> t}(k == key)}(h)}\n");
+    // --- Trie definitions ---
+    emit_trie_defs(&ds);
+
+    // --- Helpers ---
     ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @assoc_get(u, @INF, dist); ! &new_d = du + w; ! &dv = @assoc_get(v, @INF, dist); \xce\xbb{0: dist; \xce\xbbn. @assoc_set(v, new_d, dist)}(new_d < dv)}\n");
+    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @trie_get(u, @DEPTH, dist); ! &new_d = du + w; ! &dv = @trie_get(v, @DEPTH, dist); \xce\xbb{0: dist; \xce\xbbn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)}\n");
     ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
     ds.append_string("@relax_round = \xce\xbbdist. @foldl(@relax_edge, dist, @edges)\n");
     ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
@@ -130,18 +204,18 @@ fn uint[]? bellman_ford(Graph* g, uint source) {
     }
     ds.append_string("]\n");
 
-    // --- Initial distance ---
-    ds.appendf("@init_dist = [#KV{%d, 0}]\n", source);
+    // --- Initial distance (trie) ---
+    ds.appendf("@init_dist = @trie_set(%d, 0, @DEPTH, #HE{})\n", source);
 
     // --- Run V-1 rounds ---
     uint rounds = n > 1 ? n - 1 : 1;
     ds.appendf("@bf = @repeat(@relax_round, @init_dist, %d)\n", rounds);
 
-    // --- Extract results ---
+    // --- Extract results (trie) ---
     ds.append_string("@main = [");
     for (uint i = 0; i < n; i++) {
         if (i > 0) ds.append_string(", ");
-        ds.appendf("@assoc_get(%d, @INF, @bf)", i);
+        ds.appendf("@trie_get(%d, @DEPTH, @bf)", i);
     }
     ds.append_string("]\n");
 
@@ -171,14 +245,18 @@ fn uint[]? delta_stepping(Graph* g, uint source, uint delta) {
     DStr ds = new_dstr();
     defer ds.free();
 
+    uint depth = ceil_log16(n);
+
     // --- Constants ---
     ds.append_string("@INF = 999999\n");
+    ds.appendf("@DEPTH = %d\n", depth);
+
+    // --- Trie definitions ---
+    emit_trie_defs(&ds);
 
     // --- Helpers ---
-    ds.append_string("@assoc_get = \xce\xbb&key. \xce\xbb&default. \xce\xbb{[]: default; <>: \xce\xbbh. \xce\xbbt. \xce\xbb{#KV: \xce\xbb&k. \xce\xbbv. \xce\xbb{0: @assoc_get(key, default, t); \xce\xbbn. v}(k == key)}(h)}\n");
-    ds.append_string("@assoc_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb{[]: [#KV{key, val}]; <>: \xce\xbb&h. \xce\xbb&t. \xce\xbb{#KV: \xce\xbb&k. \xce\xbbv. \xce\xbb{0: h <> @assoc_set(key, val, t); \xce\xbbn. #KV{k, val} <> t}(k == key)}(h)}\n");
     ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @assoc_get(u, @INF, dist); ! &new_d = du + w; ! &dv = @assoc_get(v, @INF, dist); \xce\xbb{0: dist; \xce\xbbn. @assoc_set(v, new_d, dist)}(new_d < dv)}\n");
+    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @trie_get(u, @DEPTH, dist); ! &new_d = du + w; ! &dv = @trie_get(v, @DEPTH, dist); \xce\xbb{0: dist; \xce\xbbn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)}\n");
     ds.append_string("@relax_list = \xce\xbb&dist. \xce\xbb{[]: dist; <>: \xce\xbbh. \xce\xbbt. @relax_list(@relax_edge(dist, h), t)}\n");
     ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
 
@@ -214,18 +292,18 @@ fn uint[]? delta_stepping(Graph* g, uint source, uint delta) {
     // --- One delta-stepping round ---
     ds.append_string("@one_round = \xce\xbbdist. ! &d1 = @relax_list(dist, @light_edges); ! &d2 = @relax_list(d1, @light_edges); @relax_list(d2, @heavy_edges)\n");
 
-    // --- Initial distance ---
-    ds.appendf("@init_dist = [#KV{%d, 0}]\n", source);
+    // --- Initial distance (trie) ---
+    ds.appendf("@init_dist = @trie_set(%d, 0, @DEPTH, #HE{})\n", source);
 
     // --- Run V-1 rounds ---
     uint rounds = n > 1 ? n - 1 : 1;
     ds.appendf("@result = @repeat(@one_round, @init_dist, %d)\n", rounds);
 
-    // --- Extract results ---
+    // --- Extract results (trie) ---
     ds.append_string("@main = [");
     for (uint i = 0; i < n; i++) {
         if (i > 0) ds.append_string(", ");
-        ds.appendf("@assoc_get(%d, @INF, @result)", i);
+        ds.appendf("@trie_get(%d, @DEPTH, @result)", i);
     }
     ds.append_string("]\n");
 
@@ -307,14 +385,17 @@ fn uint? contraction_query(Graph* fwd_g, Graph* bwd_g, uint source, uint target,
     defer ds.free();
 
     uint n = node_count;
+    uint depth = ceil_log16(n);
 
     // --- Constants ---
     ds.append_string("@INF = 999999\n");
-    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
+    ds.appendf("@DEPTH = %d\n", depth);
+
+    // --- Trie definitions ---
+    emit_trie_defs(&ds);
 
     // --- Helpers ---
-    ds.append_string("@assoc_get = \xce\xbb&key. \xce\xbb&def. \xce\xbb{[]: def; <>: \xce\xbb&h. \xce\xbbt. \xce\xbb{#KV: \xce\xbb&k. \xce\xbbv. \xce\xbb{0: @assoc_get(key, def, t); \xce\xbbn. v}(k == key)}(h)}\n");
-    ds.append_string("@assoc_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb{[]: [#KV{key, val}]; <>: \xce\xbb&h. \xce\xbb&t. \xce\xbb{#KV: \xce\xbb&k. \xce\xbb&v. \xce\xbb{0: #KV{k, v} <> @assoc_set(key, val, t); \xce\xbbn. #KV{k, val} <> t}(k == key)}(h)}\n");
+    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
     ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
 
     // --- Forward adjacency ---
@@ -347,11 +428,11 @@ fn uint? contraction_query(Graph* fwd_g, Graph* bwd_g, uint source, uint target,
     }
     ds.append_string("\xce\xbbn. []}\n");
 
-    // --- relax_edges ---
-    ds.append_string("@relax_edges = \xce\xbb&src_d. \xce\xbb&dist. \xce\xbb{[]: dist; <>: \xce\xbbh. \xce\xbb&t. \xce\xbb{#E: \xce\xbb&tgt. \xce\xbbw. ! &new_d = src_d + w; ! &old_d = @assoc_get(tgt, @INF, dist); \xce\xbb{0: @relax_edges(src_d, dist, t); \xce\xbbn. @relax_edges(src_d, @assoc_set(tgt, new_d, dist), t)}(new_d < old_d)}(h)}\n");
+    // --- relax_edges (trie) ---
+    ds.append_string("@relax_edges = \xce\xbb&src_d. \xce\xbb&dist. \xce\xbb{[]: dist; <>: \xce\xbbh. \xce\xbb&t. \xce\xbb{#E: \xce\xbb&tgt. \xce\xbbw. ! &new_d = src_d + w; ! &old_d = @trie_get(tgt, @DEPTH, dist); \xce\xbb{0: @relax_edges(src_d, dist, t); \xce\xbbn. @relax_edges(src_d, @trie_set(tgt, new_d, @DEPTH, dist), t)}(new_d < old_d)}(h)}\n");
 
-    // --- process_node ---
-    ds.append_string("@process_node = \xce\xbb&adj_fn. \xce\xbb&dist. \xce\xbb&node. ! &d = @assoc_get(node, @INF, dist); \xce\xbb{0: @relax_edges(d, dist, adj_fn(node)); \xce\xbbn. dist}(d == @INF)\n");
+    // --- process_node (trie) ---
+    ds.append_string("@process_node = \xce\xbb&adj_fn. \xce\xbb&dist. \xce\xbb&node. ! &d = @trie_get(node, @DEPTH, dist); \xce\xbb{0: @relax_edges(d, dist, adj_fn(node)); \xce\xbbn. dist}(d == @INF)\n");
 
     // --- Forward pass: nodes in rank order [0, 1, ..., n-1] ---
     ds.append_string("@fwd_nodes = [");
@@ -360,7 +441,7 @@ fn uint? contraction_query(Graph* fwd_g, Graph* bwd_g, uint source, uint target,
         ds.appendf("%d", i);
     }
     ds.append_string("]\n");
-    ds.appendf("@fwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@fwd_adj, dist, node), [#KV{%d, 0}], @fwd_nodes)\n", source);
+    ds.appendf("@fwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@fwd_adj, dist, node), @trie_set(%d, 0, @DEPTH, #HE{}), @fwd_nodes)\n", source);
 
     // --- Backward pass: nodes in reverse rank order [n-1, ..., 0] ---
     ds.append_string("@bwd_nodes = [");
@@ -370,16 +451,16 @@ fn uint? contraction_query(Graph* fwd_g, Graph* bwd_g, uint source, uint target,
         ds.appendf("%d", i);
     }
     ds.append_string("]\n");
-    ds.appendf("@bwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@bwd_adj, dist, node), [#KV{%d, 0}], @bwd_nodes)\n", target);
+    ds.appendf("@bwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@bwd_adj, dist, node), @trie_set(%d, 0, @DEPTH, #HE{}), @bwd_nodes)\n", target);
 
-    // --- Meet ---
+    // --- Meet (trie) ---
     ds.append_string("@all_nodes = [");
     for (uint i = 0; i < n; i++) {
         if (i > 0) ds.append_string(", ");
         ds.appendf("%d", i);
     }
     ds.append_string("]\n");
-    ds.append_string("@meet = \xce\xbb&fd. \xce\xbb&bd. @foldl(\xce\xbb&best. \xce\xbb&v. ! &df = @assoc_get(v, @INF, fd); ! &db = @assoc_get(v, @INF, bd); @min(best, df + db), @INF, @all_nodes)\n");
+    ds.append_string("@meet = \xce\xbb&fd. \xce\xbb&bd. @foldl(\xce\xbb&best. \xce\xbb&v. ! &df = @trie_get(v, @DEPTH, fd); ! &db = @trie_get(v, @DEPTH, bd); @min(best, df + db), @INF, @all_nodes)\n");
     ds.append_string("@main = @meet(@fwd_dist, @bwd_dist)\n");
 
     // --- Run HVM4 ---

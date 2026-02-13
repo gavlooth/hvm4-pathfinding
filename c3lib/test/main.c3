@@ -1,5 +1,6 @@
 module test_main;
 import pathfind;
+import swr_test;
 import std::io;
 
 fn void print_dist(uint[] d) {
@@ -155,6 +156,8 @@ fn void main() {
     }
 
     // === 6. Path Enumeration ===
+    // Note: eval_collapse returns SUP branches in nondeterministic order
+    // when multi-threaded, so we sort before comparing.
     {
         pathfind::Graph g;
         g.init(6);
@@ -168,11 +171,22 @@ fn void main() {
         pathfind::PathResult pr = pathfind::enumerate_paths(&g, 0, 5)!!;
         defer free(pr.weights.ptr);
 
-        uint[4] expect = { 6, 7, 11, 6 };
+        uint[4] expect = { 6, 6, 7, 11 };
+        // Sort results for order-independent comparison
+        uint[] got = pr.weights;
+        for (usz i = 1; i < got.len; i++) {
+            uint key = got[i];
+            isz j = (isz)i - 1;
+            while (j >= 0 && got[j] > key) {
+                got[j + 1] = got[j];
+                j--;
+            }
+            got[j + 1] = key;
+        }
         bool ok = pr.count == 4;
         if (ok) {
             for (usz i = 0; i < 4; i++) {
-                if (pr.weights[i] != expect[i]) { ok = false; break; }
+                if (got[i] != expect[i]) { ok = false; break; }
             }
         }
         if (ok) {
@@ -185,6 +199,9 @@ fn void main() {
             fail++;
         }
     }
+
+    // Run SWR tests
+    swr_test::run_swr_tests(&pass, &fail);
 
     io::printfn("\nResults: %d passed, %d failed", pass, fail);
 }

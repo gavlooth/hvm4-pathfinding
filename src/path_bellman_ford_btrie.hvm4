@@ -1,0 +1,172 @@
+// Bellman-Ford SSSP using linear binary trie distance table.
+//
+// Same graph as path_bellman_ford.hvm4 but uses a LINEAR binary trie
+// for distance lookups/updates. The trie is never cloned (no DUP nodes
+// on the trie structure). This enables scaling to much larger graphs
+// without OOM on HVM4's bump allocator.
+//
+// Graph (5 nodes, directed, weighted):
+//   0 -> 1 (weight 4)
+//   0 -> 2 (weight 2)
+//   1 -> 3 (weight 3)
+//   2 -> 1 (weight 1)
+//   2 -> 3 (weight 5)
+//   3 -> 4 (weight 1)
+//
+// Shortest distances from source node 0:
+//   dist[0] = 0
+//   dist[1] = 3  (0->2->1: 2+1)
+//   dist[2] = 2  (0->2)
+//   dist[3] = 6  (0->2->1->3: 2+1+3)
+//   dist[4] = 7  (0->2->1->3->4: 2+1+3+1)
+//
+// DEPTH = 3 (ceil(log2(5)) = 3, since 2^3 = 8 >= 5)
+
+// ---- constants ----
+
+@INF = 999999
+@DEPTH = 3
+
+// ---- linear binary trie ----
+// #B{l, r} = binary branch, #BL{val} = leaf, #BE{} = empty
+// Helper functions (_B, _BE) avoid l,r in multiple match arms.
+
+@btrie_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{@INF, #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_lin_B(bit, next, nd, l, r)
+}
+
+@btrie_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@btrie_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@btrie_get_lin(next, nd, r))
+}
+
+@btrie_get = λ&key. λ&depth. λ{
+  #BE: @INF;
+  #BL: λval. val;
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_B(bit, next, nd, l, r)
+}
+
+@btrie_get_B = λ{
+  0: λnext. λnd. λl. λr. @btrie_get(next, nd, l);
+  λn. λnext. λnd. λl. λr. @btrie_get(next, nd, r)
+}
+
+@btrie_set = λ&key. λ&val. λ&depth. λ{
+  #BL: λold. #BL{val};
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_set_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_set_B(bit, next, val, nd, l, r)
+}
+
+@btrie_set_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_set(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_set(next, val, nd, #BE{})}
+}
+
+@btrie_set_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_set(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_set(next, val, nd, r)}
+}
+
+@btrie_min_update = λ&key. λ&val. λ&depth. λ{
+  #BL: λ&old. λ{0: #BL{old}; λn. #BL{val}}(val < old);
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_mu_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_mu_B(bit, next, val, nd, l, r)
+}
+
+@btrie_mu_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_min_update(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_min_update(next, val, nd, #BE{})}
+}
+
+@btrie_mu_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_min_update(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_min_update(next, val, nd, r)}
+}
+
+// ---- edge list ----
+
+@edges = [#E3{0,1,4}, #E3{0,2,2}, #E3{1,3,3}, #E3{2,1,1}, #E3{2,3,5}, #E3{3,4,1}]
+
+// ---- linear relax: no &dist cloning! ----
+
+@relax_edge_lin = λdist. λ{
+  #E3: λu. λv. λw.
+    λ{#P: λ&du. λdist2.
+      ! new_d = du + w;
+      @relax_cond(du < @INF, v, new_d, dist2)
+    }(@btrie_get_lin(u, @DEPTH, dist))
+}
+
+@relax_cond = λ{
+  0: λv. λnew_d. λdist. dist;
+  λn. λv. λnew_d. λdist. @btrie_min_update(v, new_d, @DEPTH, dist)
+}
+
+@foldl_lin = λf. λacc. λlist. @foldl_go(list, f, acc)
+
+@foldl_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_go(t, f, f(acc, h))
+}
+
+@relax_round_lin = λdist. @foldl_lin(@relax_edge_lin, dist, @edges)
+
+@repeat_lin = λf. λx. λn. @repeat_go(n, f, x)
+
+@repeat_go = λ{
+  0: λf. λx. x;
+  λn. λ&f. λx. @repeat_go(n - 1, f, f(x))
+}
+
+// ---- initial distance table: source 0 has distance 0 ----
+
+@init_dist = @btrie_set(0, 0, @DEPTH, #BE{})
+
+// ---- run Bellman-Ford: V-1 = 4 rounds (LINEAR — no trie cloning) ----
+
+@bf = @repeat_lin(@relax_round_lin, @init_dist, 4)
+
+// ---- extract results ----
+// Use destructive btrie_get since @bf is a book ref (re-instantiated per use)
+
+@main = [
+  @btrie_get(0, @DEPTH, @bf),
+  @btrie_get(1, @DEPTH, @bf),
+  @btrie_get(2, @DEPTH, @bf),
+  @btrie_get(3, @DEPTH, @bf),
+  @btrie_get(4, @DEPTH, @bf)]
+//[0,3,2,6,7]

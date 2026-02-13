@@ -1,0 +1,482 @@
+// Dijkstra SSSP — linear binary trie + leftist heap PQ — V=256, E=503, depth=8
+// Expected: dist[255] = 50
+
+@INF = 999999
+@DEPTH = 8
+
+@btrie_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{@INF, #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_lin_B(bit, next, nd, l, r)
+}
+
+@btrie_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@btrie_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@btrie_get_lin(next, nd, r))
+}
+
+@btrie_get = λ&key. λ&depth. λ{
+  #BE: @INF;
+  #BL: λval. val;
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_get_B(bit, next, nd, l, r)
+}
+
+@btrie_get_B = λ{
+  0: λnext. λnd. λl. λr. @btrie_get(next, nd, l);
+  λn. λnext. λnd. λl. λr. @btrie_get(next, nd, r)
+}
+
+@btrie_set = λ&key. λ&val. λ&depth. λ{
+  #BL: λold. #BL{val};
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_set_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_set_B(bit, next, val, nd, l, r)
+}
+
+@btrie_set_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_set(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_set(next, val, nd, #BE{})}
+}
+
+@btrie_set_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_set(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_set(next, val, nd, r)}
+}
+
+@btrie_min_update = λ&key. λ&val. λ&depth. λ{
+  #BL: λ&old. λ{0: #BL{old}; λn. #BL{val}}(val < old);
+  #BE: λ{
+    0: #BL{val};
+    λn.
+      ! &bit = key % 2;
+      ! &next = key / 2;
+      ! &nd = depth - 1;
+      @btrie_mu_BE(bit, next, val, nd)
+  }(depth);
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @btrie_mu_B(bit, next, val, nd, l, r)
+}
+
+@btrie_mu_BE = λ{
+  0: λnext. λval. λnd. #B{@btrie_min_update(next, val, nd, #BE{}), #BE{}};
+  λn. λnext. λval. λnd. #B{#BE{}, @btrie_min_update(next, val, nd, #BE{})}
+}
+
+@btrie_mu_B = λ{
+  0: λnext. λval. λnd. λl. λr. #B{@btrie_min_update(next, val, nd, l), r};
+  λn. λnext. λval. λnd. λl. λr. #B{l, @btrie_min_update(next, val, nd, r)}
+}
+
+
+@pq_empty = #PQE{}
+
+@pq_rank = λ{
+  #PQE: 0;
+  #PQN: λp.λv.λl.λr.λk. k
+}
+
+@pq_make = λ&prio.λ&val.λ&left.λ&right.
+  ! &lr = @pq_rank(left)
+  ! &rr = @pq_rank(right)
+  λ{0:
+    #PQN{prio, val, right, left, lr + 1};
+  λn.
+    #PQN{prio, val, left, right, rr + 1}
+  }(lr >= rr)
+
+@pq_merge = λ{
+  #PQE: λb. b;
+  #PQN: λ&ap.λ&av.λ&al.λ&ar.λ&ak. λ{
+    #PQE: #PQN{ap, av, al, ar, ak};
+    #PQN: λ&bp.λ&bv.λ&bl.λ&br.λ&bk.
+      λ{0:
+        @pq_make(bp, bv, bl, @pq_merge(#PQN{ap, av, al, ar, ak}, br));
+      λn.
+        @pq_make(ap, av, al, @pq_merge(ar, #PQN{bp, bv, bl, br, bk}))
+      }(ap <= bp)
+  }
+}
+
+@pq_insert = λprio.λval.λheap.
+  @pq_merge(#PQN{prio, val, #PQE{}, #PQE{}, 1}, heap)
+
+@pq_pop = λ{
+  #PQE: #PQE{};
+  #PQN: λp.λv.λl.λr.λk. #R{p, v, @pq_merge(l, r)}
+}
+
+
+@adj_get_lin = λ&key. λ&depth. λ{
+  #BE: #P{[], #BE{}};
+  #BL: λ&val. #P{val, #BL{val}};
+  #B: λl. λr.
+    ! bit = key % 2;
+    ! next = key / 2;
+    ! nd = depth - 1;
+    @adj_get_lin_B(bit, next, nd, l, r)
+}
+
+@adj_get_lin_B = λ{
+  0: λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_l. #P{val, #B{new_l, r}}}(@adj_get_lin(next, nd, l));
+  λn. λnext. λnd. λl. λr.
+    λ{#P: λval. λnew_r. #P{val, #B{l, new_r}}}(@adj_get_lin(next, nd, r))
+}
+
+
+@dijkstra = λ{
+  #DS: λadj. λdist. λpq.
+    @dijk_pop(@pq_pop(pq), adj, dist)
+}
+
+@dijk_pop = λ{
+  #PQE: λadj. λdist. #DS{adj, dist, @pq_empty};
+  #R: λd. λu. λrest. λadj. λdist.
+    @dijk_check(adj, dist, rest, d, u)
+}
+
+@dijk_check = λadj. λdist. λpq. λ&d. λ&u.
+  λ{#P: λ&du. λdist2.
+    @dijk_stale(d > du, adj, dist2, pq, d, u)
+  }(@btrie_get_lin(u, @DEPTH, dist))
+
+@dijk_stale = λ{
+  0: λadj. λdist. λpq. λd. λu.
+    @dijk_process(adj, dist, pq, d, u);
+  λn. λadj. λdist. λpq. λd. λu.
+    @dijkstra(#DS{adj, dist, pq})
+}
+
+@dijk_process = λadj. λdist. λpq. λ&d. λu.
+  λ{#P: λneighbors. λadj2.
+    @dijk_relax_then_recurse(adj2, dist, pq, d, neighbors)
+  }(@adj_get_lin(u, @DEPTH, adj))
+
+@dijk_relax_then_recurse = λadj. λdist. λpq. λd. λneighbors.
+  λ{#DS2: λdist2. λpq2.
+    @dijkstra(#DS{adj, dist2, pq2})
+  }(@relax_all(d, neighbors, dist, pq))
+
+@relax_all = λd. λneighbors. λdist. λpq.
+  @relax_fold(neighbors, d, dist, pq)
+
+@relax_fold = λ{
+  []: λd. λdist. λpq. #DS2{dist, pq};
+  <>: λh. λt. λ&d. λdist. λpq.
+    λ{#P: λ&v. λ&w.
+      @relax_one_then_continue(t, d, v, d + w, dist, pq)
+    }(h)
+}
+
+@relax_one_then_continue = λt. λd. λ&v. λ&new_d. λdist. λpq.
+  λ{#P: λ&dv. λdist2.
+    @relax_decide(new_d < dv, t, d, v, new_d, dv, dist2, pq)
+  }(@btrie_get_lin(v, @DEPTH, dist))
+
+@relax_decide = λ{
+  0: λt. λd. λv. λnew_d. λdv. λdist. λpq.
+    @relax_fold(t, d, dist, pq);
+  λn. λt. λd. λ&v. λ&new_d. λdv. λdist. λpq.
+    ! dist2 = @btrie_set(v, new_d, @DEPTH, dist);
+    ! pq2 = @pq_insert(new_d, v, pq);
+    @relax_fold(t, d, dist2, pq2)
+}
+
+// ===== adjacency trie =====
+
+@adj_trie =
+  @btrie_set(0, [#P{1,2}, #P{57,15}], @DEPTH,
+  @btrie_set(1, [#P{2,3}, #P{166,12}], @DEPTH,
+  @btrie_set(2, [#P{3,10}, #P{19,1}], @DEPTH,
+  @btrie_set(3, [#P{4,7}, #P{128,14}], @DEPTH,
+  @btrie_set(4, [#P{5,2}, #P{237,7}], @DEPTH,
+  @btrie_set(5, [#P{6,1}, #P{90,16}], @DEPTH,
+  @btrie_set(6, [#P{7,10}, #P{199,17}], @DEPTH,
+  @btrie_set(7, [#P{8,3}, #P{52,18}], @DEPTH,
+  @btrie_set(8, [#P{9,2}, #P{161,3}], @DEPTH,
+  @btrie_set(9, [#P{10,7}, #P{14,12}], @DEPTH,
+  @btrie_set(10, [#P{11,2}, #P{123,13}], @DEPTH,
+  @btrie_set(11, [#P{12,1}, #P{232,18}], @DEPTH,
+  @btrie_set(12, [#P{13,2}, #P{85,3}], @DEPTH,
+  @btrie_set(13, [#P{14,7}], @DEPTH,
+  @btrie_set(14, [#P{15,10}, #P{47,17}], @DEPTH,
+  @btrie_set(15, [#P{16,3}, #P{156,18}], @DEPTH,
+  @btrie_set(16, [#P{17,2}, #P{9,3}], @DEPTH,
+  @btrie_set(17, [#P{18,9}, #P{118,16}], @DEPTH,
+  @btrie_set(18, [#P{19,8}, #P{227,5}], @DEPTH,
+  @btrie_set(19, [#P{20,7}, #P{80,14}], @DEPTH,
+  @btrie_set(20, [#P{21,8}, #P{189,3}], @DEPTH,
+  @btrie_set(21, [#P{22,9}, #P{42,16}], @DEPTH,
+  @btrie_set(22, [#P{23,6}, #P{151,1}], @DEPTH,
+  @btrie_set(23, [#P{24,3}, #P{4,2}], @DEPTH,
+  @btrie_set(24, [#P{25,8}, #P{113,7}], @DEPTH,
+  @btrie_set(25, [#P{26,1}, #P{222,8}], @DEPTH,
+  @btrie_set(26, [#P{27,8}, #P{75,1}], @DEPTH,
+  @btrie_set(27, [#P{28,5}, #P{184,10}], @DEPTH,
+  @btrie_set(28, [#P{29,6}, #P{37,19}], @DEPTH,
+  @btrie_set(29, [#P{30,7}, #P{146,12}], @DEPTH,
+  @btrie_set(30, [#P{31,6}, #P{255,1}], @DEPTH,
+  @btrie_set(31, [#P{32,1}, #P{108,18}], @DEPTH,
+  @btrie_set(32, [#P{33,6}, #P{217,19}], @DEPTH,
+  @btrie_set(33, [#P{34,9}, #P{70,8}], @DEPTH,
+  @btrie_set(34, [#P{35,6}, #P{179,9}], @DEPTH,
+  @btrie_set(35, [#P{36,5}, #P{32,2}], @DEPTH,
+  @btrie_set(36, [#P{37,8}, #P{141,11}], @DEPTH,
+  @btrie_set(37, [#P{38,9}, #P{250,4}], @DEPTH,
+  @btrie_set(38, [#P{39,4}, #P{103,13}], @DEPTH,
+  @btrie_set(39, [#P{40,7}, #P{212,2}], @DEPTH,
+  @btrie_set(40, [#P{41,8}, #P{65,15}], @DEPTH,
+  @btrie_set(41, [#P{42,3}, #P{174,4}], @DEPTH,
+  @btrie_set(42, [#P{43,2}, #P{27,5}], @DEPTH,
+  @btrie_set(43, [#P{44,1}, #P{136,14}], @DEPTH,
+  @btrie_set(44, [#P{45,4}, #P{245,19}], @DEPTH,
+  @btrie_set(45, [#P{46,7}, #P{98,8}], @DEPTH,
+  @btrie_set(46, [#P{47,8}, #P{207,13}], @DEPTH,
+  @btrie_set(47, [#P{48,9}, #P{60,18}], @DEPTH,
+  @btrie_set(48, [#P{49,4}, #P{169,7}], @DEPTH,
+  @btrie_set(49, [#P{50,1}, #P{22,8}], @DEPTH,
+  @btrie_set(50, [#P{51,10}, #P{131,5}], @DEPTH,
+  @btrie_set(51, [#P{52,1}, #P{240,2}], @DEPTH,
+  @btrie_set(52, [#P{53,4}, #P{93,7}], @DEPTH,
+  @btrie_set(53, [#P{54,5}, #P{202,4}], @DEPTH,
+  @btrie_set(54, [#P{55,10}], @DEPTH,
+  @btrie_set(55, [#P{56,5}, #P{164,2}], @DEPTH,
+  @btrie_set(56, [#P{57,2}, #P{17,7}], @DEPTH,
+  @btrie_set(57, [#P{58,9}, #P{126,4}], @DEPTH,
+  @btrie_set(58, [#P{59,10}, #P{235,5}], @DEPTH,
+  @btrie_set(59, [#P{60,1}, #P{88,6}], @DEPTH,
+  @btrie_set(60, [#P{61,8}, #P{197,19}], @DEPTH,
+  @btrie_set(61, [#P{62,3}, #P{50,4}], @DEPTH,
+  @btrie_set(62, [#P{63,4}, #P{159,9}], @DEPTH,
+  @btrie_set(63, [#P{64,3}, #P{12,14}], @DEPTH,
+  @btrie_set(64, [#P{65,2}, #P{121,15}], @DEPTH,
+  @btrie_set(65, [#P{66,7}, #P{230,12}], @DEPTH,
+  @btrie_set(66, [#P{67,10}, #P{83,1}], @DEPTH,
+  @btrie_set(67, [#P{68,3}, #P{192,6}], @DEPTH,
+  @btrie_set(68, [#P{69,8}, #P{45,3}], @DEPTH,
+  @btrie_set(69, [#P{70,7}, #P{154,12}], @DEPTH,
+  @btrie_set(70, [#P{71,6}, #P{7,9}], @DEPTH,
+  @btrie_set(71, [#P{72,9}, #P{116,2}], @DEPTH,
+  @btrie_set(72, [#P{73,6}, #P{225,19}], @DEPTH,
+  @btrie_set(73, [#P{74,7}, #P{78,4}], @DEPTH,
+  @btrie_set(74, [#P{75,10}, #P{187,5}], @DEPTH,
+  @btrie_set(75, [#P{76,1}, #P{40,18}], @DEPTH,
+  @btrie_set(76, [#P{77,6}, #P{149,3}], @DEPTH,
+  @btrie_set(77, [#P{78,1}], @DEPTH,
+  @btrie_set(78, [#P{79,4}, #P{111,17}], @DEPTH,
+  @btrie_set(79, [#P{80,5}, #P{220,18}], @DEPTH,
+  @btrie_set(80, [#P{81,8}, #P{73,3}], @DEPTH,
+  @btrie_set(81, [#P{82,5}, #P{182,16}], @DEPTH,
+  @btrie_set(82, [#P{83,10}, #P{35,9}], @DEPTH,
+  @btrie_set(83, [#P{84,3}, #P{144,6}], @DEPTH,
+  @btrie_set(84, [#P{85,10}, #P{253,7}], @DEPTH,
+  @btrie_set(85, [#P{86,5}, #P{106,8}], @DEPTH,
+  @btrie_set(86, [#P{87,2}, #P{215,5}], @DEPTH,
+  @btrie_set(87, [#P{88,9}, #P{68,6}], @DEPTH,
+  @btrie_set(88, [#P{89,8}, #P{177,11}], @DEPTH,
+  @btrie_set(89, [#P{90,3}, #P{30,12}], @DEPTH,
+  @btrie_set(90, [#P{91,10}, #P{139,5}], @DEPTH,
+  @btrie_set(91, [#P{92,1}, #P{248,10}], @DEPTH,
+  @btrie_set(92, [#P{93,2}, #P{101,3}], @DEPTH,
+  @btrie_set(93, [#P{94,1}, #P{210,16}], @DEPTH,
+  @btrie_set(94, [#P{95,2}, #P{63,13}], @DEPTH,
+  @btrie_set(95, [#P{96,3}, #P{172,18}], @DEPTH,
+  @btrie_set(96, [#P{97,4}, #P{25,19}], @DEPTH,
+  @btrie_set(97, [#P{98,9}, #P{134,16}], @DEPTH,
+  @btrie_set(98, [#P{99,6}, #P{243,17}], @DEPTH,
+  @btrie_set(99, [#P{100,3}, #P{96,10}], @DEPTH,
+  @btrie_set(100, [#P{101,2}, #P{205,11}], @DEPTH,
+  @btrie_set(101, [#P{102,1}, #P{58,16}], @DEPTH,
+  @btrie_set(102, [#P{103,6}, #P{167,17}], @DEPTH,
+  @btrie_set(103, [#P{104,1}, #P{20,18}], @DEPTH,
+  @btrie_set(104, [#P{105,2}, #P{129,19}], @DEPTH,
+  @btrie_set(105, [#P{106,5}, #P{238,4}], @DEPTH,
+  @btrie_set(106, [#P{107,10}, #P{91,1}], @DEPTH,
+  @btrie_set(107, [#P{108,5}, #P{200,2}], @DEPTH,
+  @btrie_set(108, [#P{109,6}, #P{53,3}], @DEPTH,
+  @btrie_set(109, [#P{110,1}, #P{162,20}], @DEPTH,
+  @btrie_set(110, [#P{111,2}, #P{15,17}], @DEPTH,
+  @btrie_set(111, [#P{112,7}, #P{124,18}], @DEPTH,
+  @btrie_set(112, [#P{113,10}, #P{233,3}], @DEPTH,
+  @btrie_set(113, [#P{114,9}, #P{86,20}], @DEPTH,
+  @btrie_set(114, [#P{115,6}, #P{195,17}], @DEPTH,
+  @btrie_set(115, [#P{116,7}, #P{48,6}], @DEPTH,
+  @btrie_set(116, [#P{117,4}, #P{157,3}], @DEPTH,
+  @btrie_set(117, [#P{118,5}, #P{10,4}], @DEPTH,
+  @btrie_set(118, [#P{119,6}], @DEPTH,
+  @btrie_set(119, [#P{120,7}, #P{228,2}], @DEPTH,
+  @btrie_set(120, [#P{121,8}, #P{81,11}], @DEPTH,
+  @btrie_set(121, [#P{122,9}, #P{190,20}], @DEPTH,
+  @btrie_set(122, [#P{123,2}, #P{43,17}], @DEPTH,
+  @btrie_set(123, [#P{124,1}, #P{152,6}], @DEPTH,
+  @btrie_set(124, [#P{125,6}, #P{5,7}], @DEPTH,
+  @btrie_set(125, [#P{126,3}, #P{114,4}], @DEPTH,
+  @btrie_set(126, [#P{127,4}, #P{223,1}], @DEPTH,
+  @btrie_set(127, [#P{128,9}, #P{76,2}], @DEPTH,
+  @btrie_set(128, [#P{129,10}, #P{185,7}], @DEPTH,
+  @btrie_set(129, [#P{130,1}, #P{38,20}], @DEPTH,
+  @btrie_set(130, [#P{131,2}, #P{147,13}], @DEPTH,
+  @btrie_set(131, [#P{132,5}, #P{0,2}], @DEPTH,
+  @btrie_set(132, [#P{133,10}, #P{109,11}], @DEPTH,
+  @btrie_set(133, [#P{134,7}, #P{218,16}], @DEPTH,
+  @btrie_set(134, [#P{135,2}, #P{71,9}], @DEPTH,
+  @btrie_set(135, [#P{136,5}, #P{180,2}], @DEPTH,
+  @btrie_set(136, [#P{137,10}, #P{33,3}], @DEPTH,
+  @btrie_set(137, [#P{138,7}, #P{142,12}], @DEPTH,
+  @btrie_set(138, [#P{139,10}, #P{251,17}], @DEPTH,
+  @btrie_set(139, [#P{140,9}, #P{104,10}], @DEPTH,
+  @btrie_set(140, [#P{141,6}, #P{213,15}], @DEPTH,
+  @btrie_set(141, [#P{142,1}], @DEPTH,
+  @btrie_set(142, [#P{143,6}, #P{175,17}], @DEPTH,
+  @btrie_set(143, [#P{144,9}, #P{28,18}], @DEPTH,
+  @btrie_set(144, [#P{145,10}, #P{137,7}], @DEPTH,
+  @btrie_set(145, [#P{146,1}, #P{246,8}], @DEPTH,
+  @btrie_set(146, [#P{147,4}, #P{99,13}], @DEPTH,
+  @btrie_set(147, [#P{148,7}, #P{208,14}], @DEPTH,
+  @btrie_set(148, [#P{149,10}, #P{61,3}], @DEPTH,
+  @btrie_set(149, [#P{150,5}, #P{170,20}], @DEPTH,
+  @btrie_set(150, [#P{151,8}, #P{23,17}], @DEPTH,
+  @btrie_set(151, [#P{152,9}, #P{132,18}], @DEPTH,
+  @btrie_set(152, [#P{153,8}, #P{241,15}], @DEPTH,
+  @btrie_set(153, [#P{154,7}, #P{94,20}], @DEPTH,
+  @btrie_set(154, [#P{155,10}, #P{203,13}], @DEPTH,
+  @btrie_set(155, [#P{156,5}, #P{56,18}], @DEPTH,
+  @btrie_set(156, [#P{157,2}, #P{165,19}], @DEPTH,
+  @btrie_set(157, [#P{158,1}, #P{18,20}], @DEPTH,
+  @btrie_set(158, [#P{159,2}, #P{127,5}], @DEPTH,
+  @btrie_set(159, [#P{160,3}, #P{236,2}], @DEPTH,
+  @btrie_set(160, [#P{161,4}, #P{89,19}], @DEPTH,
+  @btrie_set(161, [#P{162,7}, #P{198,4}], @DEPTH,
+  @btrie_set(162, [#P{163,10}, #P{51,17}], @DEPTH,
+  @btrie_set(163, [#P{164,1}, #P{160,18}], @DEPTH,
+  @btrie_set(164, [#P{165,10}, #P{13,19}], @DEPTH,
+  @btrie_set(165, [#P{166,1}, #P{122,20}], @DEPTH,
+  @btrie_set(166, [#P{167,2}, #P{231,17}], @DEPTH,
+  @btrie_set(167, [#P{168,5}, #P{84,10}], @DEPTH,
+  @btrie_set(168, [#P{169,10}, #P{193,3}], @DEPTH,
+  @btrie_set(169, [#P{170,9}, #P{46,20}], @DEPTH,
+  @btrie_set(170, [#P{171,4}, #P{155,9}], @DEPTH,
+  @btrie_set(171, [#P{172,3}, #P{8,10}], @DEPTH,
+  @btrie_set(172, [#P{173,10}, #P{117,19}], @DEPTH,
+  @btrie_set(173, [#P{174,5}, #P{226,4}], @DEPTH,
+  @btrie_set(174, [#P{175,6}, #P{79,9}], @DEPTH,
+  @btrie_set(175, [#P{176,3}, #P{188,10}], @DEPTH,
+  @btrie_set(176, [#P{177,8}, #P{41,19}], @DEPTH,
+  @btrie_set(177, [#P{178,1}, #P{150,16}], @DEPTH,
+  @btrie_set(178, [#P{179,6}, #P{3,17}], @DEPTH,
+  @btrie_set(179, [#P{180,3}, #P{112,18}], @DEPTH,
+  @btrie_set(180, [#P{181,4}, #P{221,11}], @DEPTH,
+  @btrie_set(181, [#P{182,5}, #P{74,20}], @DEPTH,
+  @btrie_set(182, [#P{183,10}], @DEPTH,
+  @btrie_set(183, [#P{184,3}, #P{36,14}], @DEPTH,
+  @btrie_set(184, [#P{185,2}, #P{145,15}], @DEPTH,
+  @btrie_set(185, [#P{186,3}, #P{254,8}], @DEPTH,
+  @btrie_set(186, [#P{187,10}, #P{107,13}], @DEPTH,
+  @btrie_set(187, [#P{188,1}, #P{216,10}], @DEPTH,
+  @btrie_set(188, [#P{189,6}, #P{69,7}], @DEPTH,
+  @btrie_set(189, [#P{190,5}, #P{178,4}], @DEPTH,
+  @btrie_set(190, [#P{191,6}, #P{31,9}], @DEPTH,
+  @btrie_set(191, [#P{192,1}, #P{140,6}], @DEPTH,
+  @btrie_set(192, [#P{193,2}, #P{249,19}], @DEPTH,
+  @btrie_set(193, [#P{194,9}, #P{102,8}], @DEPTH,
+  @btrie_set(194, [#P{195,8}, #P{211,9}], @DEPTH,
+  @btrie_set(195, [#P{196,1}, #P{64,14}], @DEPTH,
+  @btrie_set(196, [#P{197,6}, #P{173,3}], @DEPTH,
+  @btrie_set(197, [#P{198,9}, #P{26,4}], @DEPTH,
+  @btrie_set(198, [#P{199,2}, #P{135,13}], @DEPTH,
+  @btrie_set(199, [#P{200,5}, #P{244,10}], @DEPTH,
+  @btrie_set(200, [#P{201,2}, #P{97,15}], @DEPTH,
+  @btrie_set(201, [#P{202,1}, #P{206,8}], @DEPTH,
+  @btrie_set(202, [#P{203,8}, #P{59,1}], @DEPTH,
+  @btrie_set(203, [#P{204,9}, #P{168,10}], @DEPTH,
+  @btrie_set(204, [#P{205,8}, #P{21,11}], @DEPTH,
+  @btrie_set(205, [#P{206,5}], @DEPTH,
+  @btrie_set(206, [#P{207,2}, #P{239,5}], @DEPTH,
+  @btrie_set(207, [#P{208,5}, #P{92,10}], @DEPTH,
+  @btrie_set(208, [#P{209,2}, #P{201,11}], @DEPTH,
+  @btrie_set(209, [#P{210,7}, #P{54,16}], @DEPTH,
+  @btrie_set(210, [#P{211,8}, #P{163,13}], @DEPTH,
+  @btrie_set(211, [#P{212,1}, #P{16,2}], @DEPTH,
+  @btrie_set(212, [#P{213,10}, #P{125,19}], @DEPTH,
+  @btrie_set(213, [#P{214,7}, #P{234,4}], @DEPTH,
+  @btrie_set(214, [#P{215,10}, #P{87,5}], @DEPTH,
+  @btrie_set(215, [#P{216,7}, #P{196,14}], @DEPTH,
+  @btrie_set(216, [#P{217,6}, #P{49,7}], @DEPTH,
+  @btrie_set(217, [#P{218,3}, #P{158,16}], @DEPTH,
+  @btrie_set(218, [#P{219,10}, #P{11,5}], @DEPTH,
+  @btrie_set(219, [#P{220,9}, #P{120,18}], @DEPTH,
+  @btrie_set(220, [#P{221,10}, #P{229,3}], @DEPTH,
+  @btrie_set(221, [#P{222,5}, #P{82,12}], @DEPTH,
+  @btrie_set(222, [#P{223,4}, #P{191,5}], @DEPTH,
+  @btrie_set(223, [#P{224,1}, #P{44,14}], @DEPTH,
+  @btrie_set(224, [#P{225,6}, #P{153,15}], @DEPTH,
+  @btrie_set(225, [#P{226,1}, #P{6,4}], @DEPTH,
+  @btrie_set(226, [#P{227,4}, #P{115,13}], @DEPTH,
+  @btrie_set(227, [#P{228,7}, #P{224,18}], @DEPTH,
+  @btrie_set(228, [#P{229,4}, #P{77,11}], @DEPTH,
+  @btrie_set(229, [#P{230,5}, #P{186,4}], @DEPTH,
+  @btrie_set(230, [#P{231,10}, #P{39,5}], @DEPTH,
+  @btrie_set(231, [#P{232,9}, #P{148,14}], @DEPTH,
+  @btrie_set(232, [#P{233,6}, #P{1,15}], @DEPTH,
+  @btrie_set(233, [#P{234,5}, #P{110,4}], @DEPTH,
+  @btrie_set(234, [#P{235,2}, #P{219,9}], @DEPTH,
+  @btrie_set(235, [#P{236,7}, #P{72,6}], @DEPTH,
+  @btrie_set(236, [#P{237,8}, #P{181,3}], @DEPTH,
+  @btrie_set(237, [#P{238,3}, #P{34,4}], @DEPTH,
+  @btrie_set(238, [#P{239,6}, #P{143,13}], @DEPTH,
+  @btrie_set(239, [#P{240,5}, #P{252,2}], @DEPTH,
+  @btrie_set(240, [#P{241,10}, #P{105,19}], @DEPTH,
+  @btrie_set(241, [#P{242,7}, #P{214,8}], @DEPTH,
+  @btrie_set(242, [#P{243,4}, #P{67,17}], @DEPTH,
+  @btrie_set(243, [#P{244,5}, #P{176,18}], @DEPTH,
+  @btrie_set(244, [#P{245,6}, #P{29,15}], @DEPTH,
+  @btrie_set(245, [#P{246,5}, #P{138,4}], @DEPTH,
+  @btrie_set(246, [#P{247,4}], @DEPTH,
+  @btrie_set(247, [#P{248,7}, #P{100,6}], @DEPTH,
+  @btrie_set(248, [#P{249,2}, #P{209,7}], @DEPTH,
+  @btrie_set(249, [#P{250,5}, #P{62,20}], @DEPTH,
+  @btrie_set(250, [#P{251,4}, #P{171,17}], @DEPTH,
+  @btrie_set(251, [#P{252,3}, #P{24,14}], @DEPTH,
+  @btrie_set(252, [#P{253,8}, #P{133,15}], @DEPTH,
+  @btrie_set(253, [#P{254,9}, #P{242,16}], @DEPTH,
+  @btrie_set(254, [#P{255,8}, #P{95,17}], @DEPTH,
+  @btrie_set(255, [#P{204,14}], @DEPTH,
+  #BE{}))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+// ===== init and run =====
+
+@init_dist = @btrie_set(0, 0, @DEPTH, #BE{})
+@init_pq = @pq_insert(0, 0, @pq_empty)
+@init = #DS{@adj_trie, @init_dist, @init_pq}
+
+@result = @dijkstra(@init)
+
+@extract = λ{#DS: λadj. λdist. λpq.
+  @btrie_get(255, @DEPTH, dist)
+}
+
+@main = @extract(@result)
+//50

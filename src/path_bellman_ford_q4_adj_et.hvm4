@@ -1,0 +1,234 @@
+// Bellman-Ford SSSP using ADJACENCY LIST + linear RADIX-4 trie + EARLY TERMINATION.
+//
+// Key optimization: group edges by source node. Instead of doing
+// one q4_get_lin per EDGE (E lookups), we do one q4_get_lin per NODE (V lookups).
+// For V=1000, E=4000: reduces get_lin calls from 4000 to 1000 per round (75%).
+// When dist[u]=INF, we skip ALL outgoing edges from u at zero cost.
+//
+// Graph (5 nodes, directed, weighted):
+//   0 -> 1 (weight 4), 0 -> 2 (weight 2)
+//   1 -> 3 (weight 3)
+//   2 -> 1 (weight 1), 2 -> 3 (weight 5)
+//   3 -> 4 (weight 1)
+//
+// Expected: [0,3,2,6,7]
+//
+// DEPTH = 3 (ceil(log4(5)) = 2, but use 3 for safety)
+
+// ---- constants ----
+
+@INF = 999999
+@DEPTH = 3
+
+// ---- linear radix-4 trie (same as q4_et) ----
+
+@q4_get_lin = λ&key. λ&depth. λ{
+  #QE: #P{@INF, #QE{}};
+  #QL: λ&val. #P{val, #QL{val}};
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_get_lin_Q(slot, next, nd, c0, c1, c2, c3)
+}
+
+@q4_get_lin_Q = λ{
+  0: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c0. #P{val, #Q{new_c0, c1, c2, c3}}}(@q4_get_lin(next, nd, c0));
+  1: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c1. #P{val, #Q{c0, new_c1, c2, c3}}}(@q4_get_lin(next, nd, c1));
+  2: λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c2. #P{val, #Q{c0, c1, new_c2, c3}}}(@q4_get_lin(next, nd, c2));
+  λn. λnext. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λval. λnew_c3. #P{val, #Q{c0, c1, c2, new_c3}}}(@q4_get_lin(next, nd, c3))
+}
+
+@q4_get = λ&key. λ&depth. λ{
+  #QE: @INF;
+  #QL: λval. val;
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_get_Q(slot, next, nd, c0, c1, c2, c3)
+}
+
+@q4_get_Q = λ{
+  0: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c0);
+  1: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c1);
+  2: λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c2);
+  λn. λnext. λnd. λc0. λc1. λc2. λc3. @q4_get(next, nd, c3)
+}
+
+@q4_set = λ&key. λ&val. λ&depth. λ{
+  #QL: λold. #QL{val};
+  #QE: λ{
+    0: #QL{val};
+    λn.
+      ! slot = key % 4;
+      ! next = key / 4;
+      ! nd = depth - 1;
+      @q4_set_QE(slot, next, val, nd)
+  }(depth);
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_set_Q(slot, next, val, nd, c0, c1, c2, c3)
+}
+
+@q4_set_QE = λ{
+  0: λnext. λval. λnd. #Q{@q4_set(next, val, nd, #QE{}), #QE{}, #QE{}, #QE{}};
+  1: λnext. λval. λnd. #Q{#QE{}, @q4_set(next, val, nd, #QE{}), #QE{}, #QE{}};
+  2: λnext. λval. λnd. #Q{#QE{}, #QE{}, @q4_set(next, val, nd, #QE{}), #QE{}};
+  λn. λnext. λval. λnd. #Q{#QE{}, #QE{}, #QE{}, @q4_set(next, val, nd, #QE{})}
+}
+
+@q4_set_Q = λ{
+  0: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{@q4_set(next, val, nd, c0), c1, c2, c3};
+  1: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, @q4_set(next, val, nd, c1), c2, c3};
+  2: λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, c1, @q4_set(next, val, nd, c2), c3};
+  λn. λnext. λval. λnd. λc0. λc1. λc2. λc3. #Q{c0, c1, c2, @q4_set(next, val, nd, c3)}
+}
+
+@q4_min_update_f = λ&key. λ&val. λ&depth. λ{
+  #QL: λ&old. λ{0: #P{#QL{old}, 0}; λn. #P{#QL{val}, 1}}(val < old);
+  #QE: λ{
+    0: #P{#QL{val}, 1};
+    λn.
+      ! slot = key % 4;
+      ! next = key / 4;
+      ! nd = depth - 1;
+      @q4_muf_QE(slot, next, val, nd)
+  }(depth);
+  #Q: λc0. λc1. λc2. λc3.
+    ! slot = key % 4;
+    ! next = key / 4;
+    ! nd = depth - 1;
+    @q4_muf_Q(slot, next, val, nd, c0, c1, c2, c3)
+}
+
+@q4_muf_QE = λ{
+  0: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{child, #QE{}, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  1: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, child, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  2: λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, #QE{}, child, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{}));
+  λn. λnext. λval. λnd.
+    λ{#P: λchild. λc. #P{#Q{#QE{}, #QE{}, #QE{}, child}, c}}(@q4_min_update_f(next, val, nd, #QE{}))
+}
+
+@q4_muf_Q = λ{
+  0: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c0. λc. #P{#Q{new_c0, c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c0));
+  1: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c1. λc. #P{#Q{c0, new_c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c1));
+  2: λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c2. λc. #P{#Q{c0, c1, new_c2, c3}, c}}(@q4_min_update_f(next, val, nd, c2));
+  λn. λnext. λval. λnd. λc0. λc1. λc2. λc3.
+    λ{#P: λnew_c3. λc. #P{#Q{c0, c1, c2, new_c3}, c}}(@q4_min_update_f(next, val, nd, c3))
+}
+
+// ---- adjacency list ----
+// #N{u, outgoing_edges} where outgoing_edges = [#E2{v, w}, ...]
+// Only nodes WITH outgoing edges are listed.
+
+@adj = [
+  #N{0, [#E2{1,4}, #E2{2,2}]},
+  #N{1, [#E2{3,3}]},
+  #N{2, [#E2{1,1}, #E2{3,5}]},
+  #N{3, [#E2{4,1}]}
+]
+
+// ---- adjacency-list relaxation ----
+
+// Process one node: get dist[u] once, then relax all outgoing edges
+@relax_node_et = λ{
+  #S: λdist. λ&changed. λ{
+    #N: λu. λout.
+      λ{#P: λ&du. λdist2.
+        @relax_node_go(du < @INF, du, out, dist2, changed)
+      }(@q4_get_lin(u, @DEPTH, dist))
+  }
+}
+
+// If du < INF, relax all outgoing edges; otherwise skip entire node
+@relax_node_go = λ{
+  0: λdu. λout. λdist. λchanged. #S{dist, changed};
+  λn. λ&du. λout. λdist. λchanged.
+    @foldl_inner(@relax_out(du), #S{dist, changed}, out)
+}
+
+// Relax one outgoing edge #E2{v, w} given source distance du
+@relax_out = λ&du. λ{
+  #S: λdist. λ&changed. λ{
+    #E2: λv. λw.
+      ! new_d = du + w;
+      λ{#P: λnew_dist. λc. #S{new_dist, changed + c}}(@q4_min_update_f(v, new_d, @DEPTH, dist))
+  }
+}
+
+// Inner fold for outgoing edges of one node
+@foldl_inner = λf. λacc. λlist. @foldl_inner_go(list, f, acc)
+
+@foldl_inner_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_inner_go(t, f, f(acc, h))
+}
+
+// Outer fold over adjacency list
+@foldl_et = λf. λacc. λlist. @foldl_et_go(list, f, acc)
+
+@foldl_et_go = λ{
+  []: λf. λacc. acc;
+  <>: λh. λt. λ&f. λacc. @foldl_et_go(t, f, f(acc, h))
+}
+
+@relax_round_et = λ{
+  #S: λdist. λold_changed.
+    @foldl_et(@relax_node_et, #S{dist, 0}, @adj)
+}
+
+@repeat_until = λf. λx. λn. @repeat_until_go(n, f, x)
+
+@repeat_until_go = λ{
+  0: λf. λx. x;
+  λn. λ&f. λstate.
+    @check_continue(n, f, f(state))
+}
+
+@check_continue = λ&n. λ&f. λ{
+  #S: λdist. λchanged.
+    @check_go(changed, n, f, dist)
+}
+
+@check_go = λ{
+  0: λn. λf. λdist. #S{dist, 0};
+  λm. λn. λf. λdist. @repeat_until_go(n - 1, f, #S{dist, 1})
+}
+
+// ---- initial state ----
+
+@init_dist = @q4_set(0, 0, @DEPTH, #QE{})
+@init_state = #S{@init_dist, 1}
+
+@bf = @repeat_until(@relax_round_et, @init_state, 4)
+
+// ---- extract results ----
+
+@extract = λ{#S: λdist. λc.
+  λ{#P: λ&d0. λdist.
+  λ{#P: λ&d1. λdist.
+  λ{#P: λ&d2. λdist.
+  λ{#P: λ&d3. λdist.
+    ! d4 = @q4_get(4, @DEPTH, dist);
+    [d0, d1, d2, d3, d4]
+  }(@q4_get_lin(3, @DEPTH, dist))
+  }(@q4_get_lin(2, @DEPTH, dist))
+  }(@q4_get_lin(1, @DEPTH, dist))
+  }(@q4_get_lin(0, @DEPTH, dist))
+}
+
+@main = @extract(@bf)
+//[0,3,2,6,7]

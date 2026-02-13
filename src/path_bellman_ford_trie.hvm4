@@ -1,0 +1,150 @@
+// Bellman-Ford SSSP using radix-16 trie distance table.
+//
+// Same graph as path_bellman_ford.hvm4 but uses O(log16(V)) trie
+// instead of O(V) association lists for distance lookups/updates.
+//
+// Graph (5 nodes, directed, weighted):
+//   0 -> 1 (weight 4)
+//   0 -> 2 (weight 2)
+//   1 -> 3 (weight 3)
+//   2 -> 1 (weight 1)
+//   2 -> 3 (weight 5)
+//   3 -> 4 (weight 1)
+//
+// Shortest distances from source node 0:
+//   dist[0] = 0
+//   dist[1] = 3  (0->2->1: 2+1)
+//   dist[2] = 2  (0->2)
+//   dist[3] = 6  (0->2->1->3: 2+1+3)
+//   dist[4] = 7  (0->2->1->3->4: 2+1+3+1)
+//
+// DEPTH = 1 (ceil(log16(5)) = 1, since 16^1 = 16 >= 5)
+
+// ---- constants ----
+
+@INF = 999999
+@DEPTH = 1
+
+// ---- radix-16 trie ----
+// #H{c0..c15} = 16-way branch, #HL{val} = leaf, #HE{} = empty
+
+@trie_get = λ&key. λ&depth. λ{
+  #HE: @INF;
+  #HL: λval. val;
+  #H: λc0.λc1.λc2.λc3.λc4.λc5.λc6.λc7.λc8.λc9.λc10.λc11.λc12.λc13.λc14.λc15.
+    ! &slot = key % 16;
+    ! &next = key / 16;
+    ! &nd = depth - 1;
+    λ{
+      0:  @trie_get(next,nd,c0);  1:  @trie_get(next,nd,c1);
+      2:  @trie_get(next,nd,c2);  3:  @trie_get(next,nd,c3);
+      4:  @trie_get(next,nd,c4);  5:  @trie_get(next,nd,c5);
+      6:  @trie_get(next,nd,c6);  7:  @trie_get(next,nd,c7);
+      8:  @trie_get(next,nd,c8);  9:  @trie_get(next,nd,c9);
+      10: @trie_get(next,nd,c10); 11: @trie_get(next,nd,c11);
+      12: @trie_get(next,nd,c12); 13: @trie_get(next,nd,c13);
+      14: @trie_get(next,nd,c14); λn. @trie_get(next,nd,c15)
+    }(slot)
+}
+
+@trie_set = λ&key. λ&val. λ&depth. λ{
+  #HL: λold. #HL{val};
+  #HE: λ{
+    0: #HL{val};
+    λn.
+      ! &slot = key % 16;
+      ! &next = key / 16;
+      ! &nd = depth - 1;
+      ! &leaf = @trie_set(next, val, nd, #HE{});
+      @trie_set_slot(slot, leaf)
+  }(depth);
+  #H: λ&c0.λ&c1.λ&c2.λ&c3.λ&c4.λ&c5.λ&c6.λ&c7.λ&c8.λ&c9.λ&c10.λ&c11.λ&c12.λ&c13.λ&c14.λ&c15.
+    ! &slot = key % 16;
+    ! &next = key / 16;
+    ! &nd = depth - 1;
+    λ{
+      0:  #H{@trie_set(next,val,nd,c0),c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      1:  #H{c0,@trie_set(next,val,nd,c1),c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      2:  #H{c0,c1,@trie_set(next,val,nd,c2),c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      3:  #H{c0,c1,c2,@trie_set(next,val,nd,c3),c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      4:  #H{c0,c1,c2,c3,@trie_set(next,val,nd,c4),c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      5:  #H{c0,c1,c2,c3,c4,@trie_set(next,val,nd,c5),c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      6:  #H{c0,c1,c2,c3,c4,c5,@trie_set(next,val,nd,c6),c7,c8,c9,c10,c11,c12,c13,c14,c15};
+      7:  #H{c0,c1,c2,c3,c4,c5,c6,@trie_set(next,val,nd,c7),c8,c9,c10,c11,c12,c13,c14,c15};
+      8:  #H{c0,c1,c2,c3,c4,c5,c6,c7,@trie_set(next,val,nd,c8),c9,c10,c11,c12,c13,c14,c15};
+      9:  #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,@trie_set(next,val,nd,c9),c10,c11,c12,c13,c14,c15};
+      10: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,@trie_set(next,val,nd,c10),c11,c12,c13,c14,c15};
+      11: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,@trie_set(next,val,nd,c11),c12,c13,c14,c15};
+      12: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,@trie_set(next,val,nd,c12),c13,c14,c15};
+      13: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,@trie_set(next,val,nd,c13),c14,c15};
+      14: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,@trie_set(next,val,nd,c14),c15};
+      λn. #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,@trie_set(next,val,nd,c15)}
+    }(slot)
+}
+
+@trie_set_slot = λ&slot. λ&child. λ{
+  0:  #H{child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  1:  #H{#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  2:  #H{#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  3:  #H{#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  4:  #H{#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  5:  #H{#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  6:  #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  7:  #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  8:  #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  9:  #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}};
+  10: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{}};
+  11: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{}};
+  12: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{}};
+  13: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{}};
+  14: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{}};
+  λn. #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child}
+}(slot)
+
+// ---- min ----
+
+@min = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+// ---- edge list ----
+
+@edges = [#E3{0,1,4}, #E3{0,2,2}, #E3{1,3,3}, #E3{2,1,1}, #E3{2,3,5}, #E3{3,4,1}]
+
+// ---- relax one edge using trie ----
+
+@relax_edge = λ&dist. λ{
+  #E3: λ&u. λ&v. λw.
+    ! &du = @trie_get(u, @DEPTH, dist);
+    ! &new_d = du + w;
+    ! &dv = @trie_get(v, @DEPTH, dist);
+    λ{0: dist; λn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)
+}
+
+// ---- foldl ----
+
+@foldl = λ&f. λ&acc. λ{[]: acc; <>: λh. λt. @foldl(f, f(acc, h), t)}
+
+// ---- relax all edges ----
+
+@relax_round = λdist. @foldl(@relax_edge, dist, @edges)
+
+// ---- repeat ----
+
+@repeat = λ&f. λ&x. λ{0: x; λn. @repeat(f, f(x), n - 1)}
+
+// ---- initial distance table: source 0 has distance 0 ----
+
+@init_dist = @trie_set(0, 0, @DEPTH, #HE{})
+
+// ---- run Bellman-Ford: V-1 = 4 rounds ----
+
+@bf = @repeat(@relax_round, @init_dist, 4)
+
+// ---- extract results ----
+
+@main = [
+  @trie_get(0, @DEPTH, @bf),
+  @trie_get(1, @DEPTH, @bf),
+  @trie_get(2, @DEPTH, @bf),
+  @trie_get(3, @DEPTH, @bf),
+  @trie_get(4, @DEPTH, @bf)]
+//[0,3,2,6,7]
