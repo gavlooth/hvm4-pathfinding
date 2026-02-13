@@ -13,6 +13,7 @@ extern fn void hvm4_lib_init() @cname("hvm4_lib_init");
 extern fn void hvm4_lib_cleanup() @cname("hvm4_lib_cleanup");
 extern fn void hvm4_lib_reset() @cname("hvm4_lib_reset");
 extern fn int hvm4_run(char* source, int collapse_limit, uint* out, int max_out) @cname("hvm4_run");
+extern fn void hvm4_graph_setup(uint* row_ptr, uint* col_idx, uint* weight, uint v) @cname("hvm4_graph_setup");
 
 // ----- Data types -----
 
@@ -102,6 +103,18 @@ fn uint ceil_log16(uint n) {
         depth++;
         cap *= 16;
     }
+    return depth;
+}
+
+// ============================================================
+// Helper: compute ceil(log4(n)) for radix-4 trie depth
+// ============================================================
+
+fn uint ceil_log4(uint n) {
+    if (n <= 4) return 1;
+    uint depth = 1;
+    uint cap = 4;
+    while (cap < n) { depth++; cap *= 4; }
     return depth;
 }
 
@@ -639,4 +652,218 @@ fn PathResult? enumerate_paths(Graph* g, uint source, uint sink) {
     free(out_buf.ptr);
 
     return (PathResult){ .weights = result, .count = (usz)count };
+}
+
+// ============================================================
+// Helper: emit radix-4 trie definitions for hybrid BF
+// ============================================================
+
+fn void emit_q4_trie_defs(DStr* ds) {
+    // q4_get_lin: linear get that returns #P{val, rebuilt_trie}
+    ds.append_string("@q4_get_lin = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{");
+    ds.append_string("#QE: #P{@INF, #QE{}}; ");
+    ds.append_string("#QL: \xce\xbb&val. #P{val, #QL{val}}; ");
+    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_get_lin_Q(slot, next, nd, c0, c1, c2, c3)}\n");
+
+    ds.append_string("@q4_get_lin_Q = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c0. #P{val, #Q{new_c0, c1, c2, c3}}}(@q4_get_lin(next, nd, c0)); ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c1. #P{val, #Q{c0, new_c1, c2, c3}}}(@q4_get_lin(next, nd, c1)); ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c2. #P{val, #Q{c0, c1, new_c2, c3}}}(@q4_get_lin(next, nd, c2)); ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c3. #P{val, #Q{c0, c1, c2, new_c3}}}(@q4_get_lin(next, nd, c3))}\n");
+
+    // q4_get: simple get returning just the value
+    ds.append_string("@q4_get = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{");
+    ds.append_string("#QE: @INF; #QL: \xce\xbbval. val; ");
+    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_get_Q(slot, next, nd, c0, c1, c2, c3)}\n");
+
+    ds.append_string("@q4_get_Q = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c0); ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c1); ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c2); ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c3)}\n");
+
+    // q4_set: insert/update
+    ds.append_string("@q4_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{");
+    ds.append_string("#QL: \xce\xbbold. #QL{val}; ");
+    ds.append_string("#QE: \xce\xbb{0: #QL{val}; \xce\xbbn. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_set_QE(slot, next, val, nd)}(depth); ");
+    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_set_Q(slot, next, val, nd, c0, c1, c2, c3)}\n");
+
+    ds.append_string("@q4_set_QE = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{@q4_set(next, val, nd, #QE{}), #QE{}, #QE{}, #QE{}}; ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, @q4_set(next, val, nd, #QE{}), #QE{}, #QE{}}; ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, #QE{}, @q4_set(next, val, nd, #QE{}), #QE{}}; ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, #QE{}, #QE{}, @q4_set(next, val, nd, #QE{})}}\n");
+
+    ds.append_string("@q4_set_Q = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{@q4_set(next, val, nd, c0), c1, c2, c3}; ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, @q4_set(next, val, nd, c1), c2, c3}; ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, c1, @q4_set(next, val, nd, c2), c3}; ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, c1, c2, @q4_set(next, val, nd, c3)}}\n");
+
+    // q4_min_update_f: conditional min-update returning #P{new_trie, changed_flag}
+    ds.append_string("@q4_min_update_f = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{");
+    ds.append_string("#QL: \xce\xbb&old. \xce\xbb{0: #P{#QL{old}, 0}; \xce\xbbn. #P{#QL{val}, 1}}(val < old); ");
+    ds.append_string("#QE: \xce\xbb{0: #P{#QL{val}, 1}; \xce\xbbn. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_muf_QE(slot, next, val, nd)}(depth); ");
+    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
+    ds.append_string("@q4_muf_Q(slot, next, val, nd, c0, c1, c2, c3)}\n");
+
+    ds.append_string("@q4_muf_QE = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{child, #QE{}, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, child, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, #QE{}, child, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, #QE{}, #QE{}, child}, c}}(@q4_min_update_f(next, val, nd, #QE{}))}\n");
+
+    ds.append_string("@q4_muf_Q = \xce\xbb{");
+    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c0. \xce\xbbc. #P{#Q{new_c0, c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c0)); ");
+    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c1. \xce\xbbc. #P{#Q{c0, new_c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c1)); ");
+    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c2. \xce\xbbc. #P{#Q{c0, c1, new_c2, c3}, c}}(@q4_min_update_f(next, val, nd, c2)); ");
+    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
+    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c3. \xce\xbbc. #P{#Q{c0, c1, c2, new_c3}, c}}(@q4_min_update_f(next, val, nd, c3))}\n");
+}
+
+// ============================================================
+// 7. Hybrid Bellman-Ford (FFI graph access)
+//    Graph stored in C memory as CSR. HVM4 only has the
+//    radix-4 distance trie. FFI primitives read graph data.
+// ============================================================
+
+const String HYBRID_BF_RELAX = `
+@relax_edges = λ&u. λ&i. λ&deg. λ&du. λ{
+  #S: λ&dist. λ&changed.
+    λ{0: #S{dist, changed};
+    λn.
+      ! &v = %graph_target(u, i);
+      ! new_d = du + %graph_weight(u, i);
+      λ{#P: λnew_dist. λc.
+        @relax_edges(u, i + 1, deg, du, #S{new_dist, changed + c})
+      }(@q4_min_update_f(v, new_d, @DEPTH, dist))
+    }(i < deg)
+}
+
+@relax_node_et = λ&u. λ{
+  #S: λdist. λ&changed.
+    λ{#P: λ&du. λdist2.
+      @relax_node_go(du < @INF, u, du, dist2, changed)
+    }(@q4_get_lin(u, @DEPTH, dist))
+}
+
+@relax_node_go = λ{
+  0: λu. λdu. λdist. λchanged. #S{dist, changed};
+  λn. λ&u. λ&du. λdist. λchanged.
+    @relax_edges(u, 0, %graph_deg(u), du, #S{dist, changed})
+}
+
+@node_loop = λ&i. λ&state.
+  λ{0: state;
+  λn. @node_loop(i + 1, @relax_node_et(i, state))
+  }(i < @V)
+
+@relax_round_et = λ{
+  #S: λdist. λold_changed.
+    @node_loop(0, #S{dist, 0})
+}
+
+@bf_loop = λ{
+  0: λstate. state;
+  λn. λstate. @bf_check(n, @relax_round_et(state))
+}
+@bf_check = λ&n. λ{
+  #S: λdist. λchanged. @bf_check_go(changed, n, dist)
+}
+@bf_check_go = λ{
+  0: λn. λdist. #S{dist, 0};
+  λm. λn. λdist. @bf_loop(n - 1, %compact(#S{dist, 1}))
+}
+`;
+
+const String HYBRID_BF_EXTRACT = `
+@extract_go = λ&i. λ{
+  #P: λ&val. λdist.
+    λ{0: [val];
+    λn. val <> @extract_go(i + 1, @q4_get_lin(i + 1, @DEPTH, dist))
+    }(i + 1 < @V)
+}
+
+@main = λ{#S: λdist. λc.
+  λ{0: [];
+  λn. @extract_go(0, @q4_get_lin(0, @DEPTH, dist))
+  }(@V)
+}(@bf)
+`;
+
+fn uint[]? bellman_ford_hybrid(Graph* g, uint source) {
+    uint n = g.n;
+    if (source >= n) return INVALID_NODE~;
+
+    // Build CSR from adjacency list
+    uint total_e = 0;
+    for (uint u = 0; u < n; u++) total_e += (uint)g.adj[u].len();
+
+    uint[] row_ptr = mem::new_array(uint, (usz)(n + 1));
+    usz alloc_e = total_e > 0 ? (usz)total_e : 1;
+    uint[] col_idx = mem::new_array(uint, alloc_e);
+    uint[] weight  = mem::new_array(uint, alloc_e);
+    defer { free(row_ptr.ptr); free(col_idx.ptr); free(weight.ptr); }
+
+    uint offset = 0;
+    for (uint u = 0; u < n; u++) {
+        row_ptr[u] = offset;
+        for (usz j = 0; j < g.adj[u].len(); j++) {
+            Edge e = g.adj[u][j];
+            col_idx[offset] = e.to;
+            weight[offset]  = e.weight;
+            offset++;
+        }
+    }
+    row_ptr[n] = offset;
+
+    // Setup: reset → register graph prims → generate source → run
+    hvm4_lib_reset();
+    hvm4_graph_setup(row_ptr.ptr, col_idx.ptr, weight.ptr, n);
+
+    DStr ds = new_dstr();
+    defer ds.free();
+    uint depth = ceil_log4(n);
+    uint rounds = n > 1 ? n - 1 : 1;
+
+    // Constants
+    ds.append_string("@INF = 999999\n");
+    ds.appendf("@DEPTH = %d\n@V = %d\n", depth, n);
+
+    // Radix-4 trie definitions
+    emit_q4_trie_defs(&ds);
+
+    // Relaxation via FFI
+    ds.append_string(HYBRID_BF_RELAX);
+
+    // Initial state + run
+    ds.appendf("@init_dist = @q4_set(%d, 0, @DEPTH, #QE{})\n", source);
+    ds.appendf("@bf = @bf_loop(%d, #S{@init_dist, 1})\n", rounds);
+
+    // Extract loop
+    ds.append_string(HYBRID_BF_EXTRACT);
+
+    // Run HVM4
+    uint[] out_buf = mem::new_array(uint, (usz)n);
+    int count = hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)n);
+    if (count < 0) { free(out_buf.ptr); return HVM_ERROR~; }
+    return out_buf;
 }

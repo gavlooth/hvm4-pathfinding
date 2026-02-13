@@ -116,6 +116,52 @@ void hvm4_lib_reset(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Graph FFI: CSR graph in C memory (outside HVM4 heap)
+// ---------------------------------------------------------------------------
+
+static uint32_t  g_graph_v;
+static uint32_t *g_csr_row_ptr;  // size V+1
+static uint32_t *g_csr_col_idx;  // size E
+static uint32_t *g_csr_weight;   // size E
+
+// %graph_deg(u) → NUM: outgoing degree of node u
+static Term prim_graph_deg(Term *args) {
+  Term u = wnf(args[0]);
+  uint32_t node = term_val(u);
+  if (node >= g_graph_v) return term_new_num(0);
+  uint32_t deg = g_csr_row_ptr[node + 1] - g_csr_row_ptr[node];
+  return term_new_num(deg);
+}
+
+// %graph_target(u, i) → NUM: i-th neighbor of node u
+static Term prim_graph_target(Term *args) {
+  Term u = wnf(args[0]);
+  Term i = wnf(args[1]);
+  uint32_t edge = g_csr_row_ptr[term_val(u)] + term_val(i);
+  return term_new_num(g_csr_col_idx[edge]);
+}
+
+// %graph_weight(u, i) → NUM: weight of i-th edge from node u
+static Term prim_graph_weight(Term *args) {
+  Term u = wnf(args[0]);
+  Term i = wnf(args[1]);
+  uint32_t edge = g_csr_row_ptr[term_val(u)] + term_val(i);
+  return term_new_num(g_csr_weight[edge]);
+}
+
+// Called AFTER hvm4_lib_reset(), BEFORE hvm4_run()
+void hvm4_graph_setup(uint32_t *row_ptr, uint32_t *col_idx,
+                      uint32_t *weight, uint32_t v) {
+  g_graph_v     = v;
+  g_csr_row_ptr = row_ptr;
+  g_csr_col_idx = col_idx;
+  g_csr_weight  = weight;
+  prim_register("graph_deg",    9,  1, prim_graph_deg);
+  prim_register("graph_target", 12, 2, prim_graph_target);
+  prim_register("graph_weight", 12, 2, prim_graph_weight);
+}
+
+// ---------------------------------------------------------------------------
 // extract_nums: recursively extract NUM values from a result term
 // ---------------------------------------------------------------------------
 //

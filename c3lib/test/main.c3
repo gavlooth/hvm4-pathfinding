@@ -57,6 +57,29 @@ fn void main() {
         }
     }
 
+    // === 1b. Bellman-Ford Hybrid ===
+    {
+        pathfind::Graph g;
+        g.init(5);
+        defer g.destroy();
+        g.add_edge(0, 1, 4);
+        g.add_edge(0, 2, 2);
+        g.add_edge(1, 3, 3);
+        g.add_edge(2, 1, 1);
+        g.add_edge(2, 3, 5);
+        g.add_edge(3, 4, 1);
+
+        uint[] dist = pathfind::bellman_ford_hybrid(&g, 0)!!;
+        defer free(dist.ptr);
+
+        if (dist[0]==0 && dist[1]==3 && dist[2]==2 && dist[3]==6 && dist[4]==7) {
+            io::printn("PASS  bellman_ford_hybrid"); pass++;
+        } else {
+            io::printn("FAIL  bellman_ford_hybrid");
+            io::printf("  got: "); print_dist(dist); fail++;
+        }
+    }
+
     // === 2. Delta-Stepping ===
     {
         pathfind::Graph g;
