@@ -1,5 +1,10 @@
 module swr;
 import pathfind;
+import swr_dijkstra;
+import swr_alt;
+import swr_cch;
+import swr_hub;
+import swr_temporal;
 import std::math;
 import std::io;
 
@@ -7,11 +12,8 @@ import std::io;
 // Constants
 // ============================================================
 
-const double PI = 3.14159265358979323846;
-const double EARTH_RADIUS_M = 6_371_000.0;
-const double DEG_TO_RAD = PI / 180.0;
-const double RAD_TO_DEG = 180.0 / PI;
 const double NM_TO_M = 1852.0;
+const uint MAX_EDGE_WEIGHT = 900_000;
 
 faultdef SWR_ERROR, PRM_DISCONNECTED, LAND_COLLISION;
 
@@ -19,10 +21,7 @@ faultdef SWR_ERROR, PRM_DISCONNECTED, LAND_COLLISION;
 // Core Types
 // ============================================================
 
-struct LatLon {
-    double lat;
-    double lon;
-}
+alias LatLon = pathfind::LatLon;
 
 struct Waypoint {
     uint id;
@@ -58,6 +57,17 @@ struct WeatherGrid {
     double timestamp;
 }
 
+struct WeatherForecast {
+    WeatherGrid[] grids;
+    uint count;
+    uint interval_hours;  // typically 6
+    uint wait_cost;       // cost of waiting one time step at a node
+}
+
+fn void WeatherForecast.destroy(&self) {
+    if (self.grids.ptr != null) free(self.grids.ptr);
+}
+
 struct ShipModel {
     double base_speed;
     double max_wave_ht;
@@ -80,12 +90,13 @@ struct CostConfig {
 }
 
 enum Algorithm : char {
-    BELLMAN_FORD,
-    DELTA_STEPPING,
-    BIDIR_BFS,
-    CONTRACTION,
     APSP,
-    ENUMERATE
+    ENUMERATE,
+    DIJKSTRA,
+    ALT,
+    CCH,
+    HUB_LABEL,
+    TEMPORAL
 }
 
 struct RouteResult {
@@ -156,6 +167,7 @@ struct SwrState {
     CostConfig cost_cfg;
     uint origin;
     uint destination;
+    WeatherForecast* forecast;
 }
 
 fn void SwrState.destroy(&self) {
@@ -188,29 +200,15 @@ fn double clamp_d(double x, double lo, double hi) {
 }
 
 // ============================================================
-// Geography
+// Geography (delegates to pathfind module)
 // ============================================================
 
 fn double haversine(LatLon a, LatLon b) {
-    double dlat = (b.lat - a.lat) * DEG_TO_RAD;
-    double dlon = (b.lon - a.lon) * DEG_TO_RAD;
-    double la = a.lat * DEG_TO_RAD;
-    double lb = b.lat * DEG_TO_RAD;
-    double s = math::sin(dlat / 2.0);
-    double c = math::sin(dlon / 2.0);
-    double h = s * s + math::cos(la) * math::cos(lb) * c * c;
-    return 2.0 * EARTH_RADIUS_M * math::asin(math::sqrt(h));
+    return pathfind::haversine(a, b);
 }
 
 fn double bearing(LatLon a, LatLon b) {
-    double la = a.lat * DEG_TO_RAD;
-    double lb = b.lat * DEG_TO_RAD;
-    double dlon = (b.lon - a.lon) * DEG_TO_RAD;
-    double y = math::sin(dlon) * math::cos(lb);
-    double x = math::cos(la) * math::sin(lb) - math::sin(la) * math::cos(lb) * math::cos(dlon);
-    double brg = math::atan2(y, x) * RAD_TO_DEG;
-    if (brg < 0.0) brg += 360.0;
-    return brg;
+    return pathfind::bearing(a, b);
 }
 
 // ============================================================
@@ -422,7 +420,7 @@ fn double compute_edge_cost(ShipModel* ship, WeatherCell weather, double dist_m,
     double reduction = 1.0 - 0.5 * wave_ratio * wave_ratio;
     reduction = clamp_d(reduction, 0.1, 1.0);
 
-    double current_angle = (weather.current_dir - heading_deg) * DEG_TO_RAD;
+    double current_angle = (weather.current_dir - heading_deg) * pathfind::DEG_TO_RAD;
     double current_along = weather.current_speed * math::cos(current_angle) * 1.94384;
 
     double eff_speed = ship.base_speed * reduction + current_along;
@@ -464,10 +462,101 @@ fn void update_all_weights(SwrState* state, WeatherGrid* weather) {
 
         uint weight = (uint)(cost * (double)state.cost_cfg.scale);
         if (weight < 1) weight = 1;
-        if (weight > 900_000) weight = 900_000;
+        if (weight > MAX_EDGE_WEIGHT) weight = MAX_EDGE_WEIGHT;
         state.prm.edge_weight[i] = weight;
     }
 
+    rebuild_graph(state);
+}
+
+// ============================================================
+// HVM4 Weather-to-Weight Pipeline (Pass 1)
+// ============================================================
+
+fn uint[]? compute_weights_hvm4(SwrState* state, WeatherGrid* weather) {
+    uint e = state.prm.edge_count;
+    if (e == 0) return SWR_ERROR~;
+
+    // Allocate per-edge weather sample arrays
+    double[] wind_speed = mem::new_array(double, e);
+    double[] wind_dir   = mem::new_array(double, e);
+    double[] wave_ht    = mem::new_array(double, e);
+    double[] cur_speed  = mem::new_array(double, e);
+    double[] cur_dir    = mem::new_array(double, e);
+    defer {
+        free(wind_speed.ptr);
+        free(wind_dir.ptr);
+        free(wave_ht.ptr);
+        free(cur_speed.ptr);
+        free(cur_dir.ptr);
+    }
+
+    // Sample weather at each edge midpoint
+    for (uint i = 0; i < e; i++) {
+        uint from = state.prm.edge_from[i];
+        uint to   = state.prm.edge_to[i];
+        LatLon mid = {
+            .lat = (state.prm.waypoints[from].pos.lat + state.prm.waypoints[to].pos.lat) / 2.0,
+            .lon = (state.prm.waypoints[from].pos.lon + state.prm.waypoints[to].pos.lon) / 2.0
+        };
+        WeatherCell w = weather.sample(mid);
+        wind_speed[i] = w.wind_speed;
+        wind_dir[i]   = w.wind_dir;
+        wave_ht[i]    = w.wave_height;
+        cur_speed[i]  = w.current_speed;
+        cur_dir[i]    = w.current_dir;
+    }
+
+    // Register weather FFI
+    pathfind::hvm4_lib_reset();
+    pathfind::hvm4_weather_setup(
+        state.prm.edge_dist_m.ptr, state.prm.edge_heading.ptr,
+        wind_speed.ptr, wind_dir.ptr, wave_ht.ptr,
+        cur_speed.ptr, cur_dir.ptr,
+        state.ship.base_speed, state.ship.max_wave_ht,
+        state.ship.fuel_rate_base, state.ship.fuel_rate_per_kt,
+        (uint)state.cost_cfg.mode, state.cost_cfg.alpha,
+        state.cost_cfg.safety_penalty, state.cost_cfg.scale,
+        e
+    );
+
+    // Generate HVM4 source: balanced binary tree of %edge_cost(i) calls
+    // Uses bifurcation pattern (bend) for parallel work-stealing.
+    // @build(depth, index) forks into two halves at each level;
+    // leaves call %edge_cost(i) via FFI, @cat merges result lists.
+    pathfind::DStr ds = pathfind::new_dstr();
+    defer ds.free();
+
+    // Compute tree depth: ceil(log2(e))
+    uint depth = 0;
+    uint cap = 1;
+    while (cap < e) { depth++; cap *= 2; }
+
+    ds.append_string("@cat = \xce\xbb{[]: \xce\xbbys. ys; <>: \xce\xbbh. \xce\xbbt. \xce\xbbys. h <> @cat(t, ys)}\n");
+    ds.append_string("@build = \xce\xbb{0: \xce\xbb&i. \xce\xbblimit. @build_base(i < limit, i);\n");
+    ds.append_string("            \xce\xbbn. \xce\xbbi. \xce\xbblimit. @build_step(n, i, limit)}\n");
+    ds.append_string("@build_base = \xce\xbb{0: \xce\xbbi. []; \xce\xbbm. \xce\xbbi. [%edge_cost(i)]}\n");
+    ds.append_string("@build_step = \xce\xbb&d. \xce\xbb&i. \xce\xbb&limit. @cat(@build(d - 1, i * 2, limit), @build(d - 1, i * 2 + 1, limit))\n");
+    ds.appendf("@main = @build(%d, 0, %d)\n", depth, e);
+
+    // Run HVM4
+    uint[] out_buf = mem::new_array(uint, e);
+    int count = pathfind::hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)e);
+
+    if (count < 0 || (uint)count != e) {
+        free(out_buf.ptr);
+        return pathfind::HVM_ERROR~;
+    }
+
+    return out_buf;
+}
+
+fn void update_weights_hvm4(SwrState* state, WeatherGrid* weather) {
+    uint[] weights = compute_weights_hvm4(state, weather)!!;
+    for (uint i = 0; i < state.prm.edge_count; i++) {
+        state.prm.edge_weight[i] = weights[i];
+    }
+    free(weights.ptr);
     rebuild_graph(state);
 }
 
@@ -524,111 +613,8 @@ fn uint[] extract_path(SwrState* state, uint[] dist) {
 // Per-Algorithm Routing Functions
 // ============================================================
 
-fn RouteResult? swr_route_bellman_ford(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
-    uint[] dist = pathfind::bellman_ford(&state.prm.graph, state.origin)!;
-
-    uint cost = dist[state.destination];
-    if (cost >= pathfind::INF) {
-        free(dist.ptr);
-        return SWR_ERROR~;
-    }
-
-    uint[] path = extract_path(state, dist);
-
-    return (RouteResult){
-        .path = path,
-        .path_len = path.len,
-        .total_cost = cost,
-        .distances = dist,
-        .dist_count = dist.len
-    };
-}
-
-fn RouteResult? swr_route_delta_step(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
-
-    // Compute delta as average edge weight / 3
-    uint sum = 0;
-    for (uint i = 0; i < state.prm.edge_count; i++) {
-        sum += state.prm.edge_weight[i];
-    }
-    uint delta = 1;
-    if (state.prm.edge_count > 0) {
-        delta = sum / state.prm.edge_count / 3;
-        if (delta < 1) delta = 1;
-    }
-
-    uint[] dist = pathfind::delta_stepping(&state.prm.graph, state.origin, delta)!;
-
-    uint cost = dist[state.destination];
-    if (cost >= pathfind::INF) {
-        free(dist.ptr);
-        return SWR_ERROR~;
-    }
-
-    uint[] path = extract_path(state, dist);
-
-    return (RouteResult){
-        .path = path,
-        .path_len = path.len,
-        .total_cost = cost,
-        .distances = dist,
-        .dist_count = dist.len
-    };
-}
-
-fn RouteResult? swr_route_bidir_bfs(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
-
-    uint d = pathfind::bidir_bfs(&state.prm.graph, state.origin, state.destination)!;
-
-    return (RouteResult){
-        .path = {},
-        .path_len = 0,
-        .total_cost = d,
-        .distances = {},
-        .dist_count = 0
-    };
-}
-
-fn RouteResult? swr_route_contraction(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
-
-    uint n = state.prm.n;
-    pathfind::Graph fwd_g;
-    fwd_g.init(n);
-    defer fwd_g.destroy();
-
-    pathfind::Graph bwd_g;
-    bwd_g.init(n);
-    defer bwd_g.destroy();
-
-    // Split edges by rank (node ID as rank)
-    for (uint i = 0; i < state.prm.edge_count; i++) {
-        uint u = state.prm.edge_from[i];
-        uint v = state.prm.edge_to[i];
-        uint w = state.prm.edge_weight[i];
-        if (v > u) {
-            fwd_g.add_edge(u, v, w);
-        } else if (v < u) {
-            bwd_g.add_edge(u, v, w);
-        }
-    }
-
-    uint d = pathfind::contraction_query(&fwd_g, &bwd_g, state.origin, state.destination, n)!;
-
-    return (RouteResult){
-        .path = {},
-        .path_len = 0,
-        .total_cost = d,
-        .distances = {},
-        .dist_count = 0
-    };
-}
-
 fn RouteResult? swr_route_apsp(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
+    update_weights_hvm4(state, weather);
 
     uint[] mat = pathfind::algebraic_apsp(&state.prm.graph)!;
     uint n = state.prm.n;
@@ -645,7 +631,7 @@ fn RouteResult? swr_route_apsp(SwrState* state, WeatherGrid* weather) {
 }
 
 fn RouteResult? swr_route_enumerate(SwrState* state, WeatherGrid* weather) {
-    update_all_weights(state, weather);
+    update_weights_hvm4(state, weather);
 
     pathfind::PathResult pr = pathfind::enumerate_paths(&state.prm.graph, state.origin, state.destination)!;
 
@@ -668,11 +654,13 @@ fn RouteResult? swr_route_enumerate(SwrState* state, WeatherGrid* weather) {
 // ============================================================
 
 fn RouteResult? swr_replan(SwrState* state, WeatherGrid* weather, Algorithm algo) {
-    if (algo == BELLMAN_FORD) return swr_route_bellman_ford(state, weather);
-    if (algo == DELTA_STEPPING) return swr_route_delta_step(state, weather);
-    if (algo == BIDIR_BFS) return swr_route_bidir_bfs(state, weather);
-    if (algo == CONTRACTION) return swr_route_contraction(state, weather);
-    if (algo == APSP) return swr_route_apsp(state, weather);
-    if (algo == ENUMERATE) return swr_route_enumerate(state, weather);
-    return SWR_ERROR~;
+    switch (algo) {
+        case APSP: return swr_route_apsp(state, weather);
+        case ENUMERATE: return swr_route_enumerate(state, weather);
+        case DIJKSTRA: return swr_dijkstra::swr_dijkstra(state, weather);
+        case ALT: return swr_alt::swr_route_alt(state, weather);
+        case CCH: return swr_cch::swr_route_cch(state, weather);
+        case HUB_LABEL: return swr_hub::swr_route_hub(state, weather);
+        case TEMPORAL: return swr_temporal::swr_route_temporal(state, state.forecast);
+    }
 }

@@ -1,0 +1,18 @@
+@get_first_of_pair = λ{
+  []: [];
+  <>: λd. λt. d
+}
+
+@get_second_of_pair = λ{
+  []: [];
+  <>: λd. λ&t. λ{[]: []; <>: λb. λr. b}(t)
+}
+
+@test_pair = [100, 200] <> []
+
+@main = [
+  @get_first_of_pair(@test_pair),
+  @get_second_of_pair(@test_pair)
+]
+
+// Expected: [100, 200]

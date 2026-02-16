@@ -1,6 +1,7 @@
 module test_main;
 import pathfind;
 import swr_test;
+import bench_test;
 import std::io;
 
 fn void print_dist(uint[] d) {
@@ -34,127 +35,7 @@ fn void main() {
     pathfind::runtime_init();
     defer pathfind::runtime_cleanup();
 
-    // === 1. Bellman-Ford ===
-    {
-        pathfind::Graph g;
-        g.init(5);
-        defer g.destroy();
-        g.add_edge(0, 1, 4);
-        g.add_edge(0, 2, 2);
-        g.add_edge(1, 3, 3);
-        g.add_edge(2, 1, 1);
-        g.add_edge(2, 3, 5);
-        g.add_edge(3, 4, 1);
-
-        uint[] dist = pathfind::bellman_ford(&g, 0)!!;
-        defer free(dist.ptr);
-
-        if (dist[0]==0 && dist[1]==3 && dist[2]==2 && dist[3]==6 && dist[4]==7) {
-            io::printn("PASS  bellman_ford"); pass++;
-        } else {
-            io::printn("FAIL  bellman_ford");
-            io::printf("  got: "); print_dist(dist); fail++;
-        }
-    }
-
-    // === 1b. Bellman-Ford Hybrid ===
-    {
-        pathfind::Graph g;
-        g.init(5);
-        defer g.destroy();
-        g.add_edge(0, 1, 4);
-        g.add_edge(0, 2, 2);
-        g.add_edge(1, 3, 3);
-        g.add_edge(2, 1, 1);
-        g.add_edge(2, 3, 5);
-        g.add_edge(3, 4, 1);
-
-        uint[] dist = pathfind::bellman_ford_hybrid(&g, 0)!!;
-        defer free(dist.ptr);
-
-        if (dist[0]==0 && dist[1]==3 && dist[2]==2 && dist[3]==6 && dist[4]==7) {
-            io::printn("PASS  bellman_ford_hybrid"); pass++;
-        } else {
-            io::printn("FAIL  bellman_ford_hybrid");
-            io::printf("  got: "); print_dist(dist); fail++;
-        }
-    }
-
-    // === 2. Delta-Stepping ===
-    {
-        pathfind::Graph g;
-        g.init(5);
-        defer g.destroy();
-        g.add_edge(0, 1, 1);
-        g.add_edge(0, 2, 5);
-        g.add_edge(1, 2, 2);
-        g.add_edge(1, 3, 6);
-        g.add_edge(2, 3, 2);
-        g.add_edge(2, 4, 1);
-        g.add_edge(3, 4, 3);
-
-        uint[] dist = pathfind::delta_stepping(&g, 0, 3)!!;
-        defer free(dist.ptr);
-
-        if (dist[0]==0 && dist[1]==1 && dist[2]==3 && dist[3]==5 && dist[4]==4) {
-            io::printn("PASS  delta_stepping"); pass++;
-        } else {
-            io::printn("FAIL  delta_stepping");
-            io::printf("  got: "); print_dist(dist); fail++;
-        }
-    }
-
-    // === 3. Bidirectional BFS ===
-    {
-        pathfind::Graph g;
-        g.init(7);
-        defer g.destroy();
-        g.add_biedge(0, 1, 1);
-        g.add_biedge(0, 3, 1);
-        g.add_biedge(1, 2, 1);
-        g.add_biedge(2, 3, 1);
-        g.add_biedge(3, 4, 1);
-        g.add_biedge(3, 6, 1);
-        g.add_biedge(4, 5, 1);
-        g.add_biedge(5, 6, 1);
-
-        uint d = pathfind::bidir_bfs(&g, 0, 6)!!;
-        if (d == 2) {
-            io::printn("PASS  bidir_bfs"); pass++;
-        } else {
-            io::printfn("FAIL  bidir_bfs (got %d, expected 2)", d); fail++;
-        }
-    }
-
-    // === 4. Contraction Hierarchy ===
-    {
-        pathfind::Graph fwd;
-        fwd.init(6);
-        defer fwd.destroy();
-        fwd.add_edge(0, 1, 2); fwd.add_edge(0, 2, 6);
-        fwd.add_edge(1, 2, 3); fwd.add_edge(1, 3, 5);
-        fwd.add_edge(2, 4, 4);
-        fwd.add_edge(3, 4, 2); fwd.add_edge(3, 5, 8);
-        fwd.add_edge(4, 5, 1);
-
-        pathfind::Graph bwd;
-        bwd.init(6);
-        defer bwd.destroy();
-        bwd.add_edge(5, 4, 1); bwd.add_edge(5, 3, 8);
-        bwd.add_edge(4, 2, 4); bwd.add_edge(4, 3, 2);
-        bwd.add_edge(3, 1, 5);
-        bwd.add_edge(2, 0, 6); bwd.add_edge(2, 1, 3);
-        bwd.add_edge(1, 0, 2);
-
-        uint d = pathfind::contraction_query(&fwd, &bwd, 0, 5, 6)!!;
-        if (d == 10) {
-            io::printn("PASS  contraction_hierarchy"); pass++;
-        } else {
-            io::printfn("FAIL  contraction_hierarchy (got %d, expected 10)", d); fail++;
-        }
-    }
-
-    // === 5. Algebraic APSP ===
+    // === 1. Algebraic APSP ===
     {
         pathfind::Graph g;
         g.init(3);
@@ -178,7 +59,7 @@ fn void main() {
         }
     }
 
-    // === 6. Path Enumeration ===
+    // === 2. Path Enumeration ===
     // Note: eval_collapse returns SUP branches in nondeterministic order
     // when multi-threaded, so we sort before comparing.
     {
@@ -223,8 +104,90 @@ fn void main() {
         }
     }
 
+    // === 3. DAG-DP ===
+    {
+        // DAG: 0->1 (w=2), 0->2 (w=4), 1->3 (w=3), 2->3 (w=1)
+        // Shortest path 0->3: 0->1->3 = 2+3 = 5, or 0->2->3 = 4+1 = 5
+        pathfind::Graph g;
+        g.init(4);
+        defer g.destroy();
+        g.add_edge(0, 1, 2);
+        g.add_edge(0, 2, 4);
+        g.add_edge(1, 3, 3);
+        g.add_edge(2, 3, 1);
+
+        uint dist = pathfind::dag_dp(&g, 0, 3)!!;
+
+        if (dist == 5) {
+            io::printn("PASS  dag_dp"); pass++;
+        } else {
+            io::printfn("FAIL  dag_dp (got %d, expected 5)", dist); fail++;
+        }
+    }
+
+    // === 4. Connected Components ===
+    {
+        // Graph with 6 nodes, 2 components:
+        //   Component A: 0-1-2 (bidirectional)
+        //   Component B: 3-4-5 (bidirectional)
+        pathfind::Graph g;
+        g.init(6);
+        defer g.destroy();
+        g.add_biedge(0, 1, 1);
+        g.add_biedge(1, 2, 1);
+        g.add_biedge(3, 4, 1);
+        g.add_biedge(4, 5, 1);
+
+        uint[] labels = pathfind::connected_components(&g)!!;
+        defer free(labels.ptr);
+
+        // Component A: nodes 0,1,2 should all have label 0
+        // Component B: nodes 3,4,5 should all have label 3
+        bool ok = labels[0] == 0 && labels[1] == 0 && labels[2] == 0
+               && labels[3] == 3 && labels[4] == 3 && labels[5] == 3;
+        if (ok) {
+            io::printn("PASS  connected_components"); pass++;
+        } else {
+            io::printf("FAIL  connected_components  got: ");
+            print_dist(labels); fail++;
+        }
+    }
+
+    // === 5. GeoGraph KNN ===
+    {
+        pathfind::GeoGraph geo;
+        geo.init(5);
+        defer geo.destroy();
+
+        // 5 European cities
+        geo.add_node(51.5074, -0.1278);  // London
+        geo.add_node(48.8566, 2.3522);   // Paris
+        geo.add_node(50.8503, 4.3517);   // Brussels
+        geo.add_node(52.3676, 4.9041);   // Amsterdam
+        geo.add_node(48.2082, 16.3738);  // Vienna
+
+        geo.connect_knn(2);
+
+        // Every node should have at least one edge
+        bool all_have_edges = true;
+        for (uint i = 0; i < 5; i++) {
+            if (geo.graph.adj[i].len() == 0) {
+                all_have_edges = false;
+                break;
+            }
+        }
+        if (all_have_edges) {
+            io::printn("PASS  geograph_knn"); pass++;
+        } else {
+            io::printn("FAIL  geograph_knn"); fail++;
+        }
+    }
+
     // Run SWR tests
     swr_test::run_swr_tests(&pass, &fail);
+
+    // Run bench tests
+    bench_test::run_bench_tests(&pass, &fail);
 
     io::printfn("\nResults: %d passed, %d failed", pass, fail);
 }

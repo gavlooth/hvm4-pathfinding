@@ -1,0 +1,41 @@
+@INF = 999
+
+@dist_lookup = λ&node. λ{
+  []: @INF;
+  <>: λ&pair. λ&rest.
+    λ{
+      []: @dist_lookup(node)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          []: @dist_lookup(node)(rest);
+          <>: λ&d. λtmp.
+            λ{0: d; λk. @dist_lookup(node)(rest)}(n == node)
+        }(tail)
+    }(pair)
+}
+
+@dist_update = λ&node. λ&new_dist. λ{
+  []: [node, new_dist] <> [];
+  <>: λ&pair. λ&rest.
+    λ{
+      []: pair <> @dist_update(node)(new_dist)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          0: [node, new_dist] <> rest;
+          λk. pair <> @dist_update(node)(new_dist)(rest)
+        }(n == node)
+    }(pair)
+}
+
+@main =
+  ! &d1 = [0, 0] <> [];
+  ! &d2 = @dist_update(1)(2)(d1);
+  ! &d3 = @dist_update(2)(5)(d2);
+  [
+    @dist_lookup(0)(d3),
+    @dist_lookup(1)(d3),
+    @dist_lookup(2)(d3),
+    @dist_lookup(3)(d3)
+  ]
+
+// Expected: [0, 2, 5, 999]

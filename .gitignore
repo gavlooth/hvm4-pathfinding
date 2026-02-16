@@ -4,3 +4,36 @@ c3lib/build/
 __pycache__/
 *.pyc
 *.log
+
+# Data files (download separately)
+julia/data/gshhg/
+julia/data/gshhg-shp-*.zip
+julia/data/aegean_grid.txt
+
+# Compiled binaries
+bench/apsp
+bench/bf
+bench/bidir_bfs
+bench/cch
+bench/ch
+bench/closure
+bench/delta_step
+bench/hub
+bench/hub_dbg
+bench/path_enum
+lib/test_gen
+
+# PDFs
+*.pdf
+
+# IDE / local
+.claude/settings.local.json
+
+# Frontend build artifacts
+frontend/.shadow-cljs/
+frontend/public/js/
+frontend/node_modules/
+
+# Weather binary / data
+weather
+weather/

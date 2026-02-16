@@ -1,0 +1,227 @@
+// Delta-Stepping Shortest Paths - Bend-style patterns
+//
+// Delta-stepping is a parallel SSSP algorithm that processes nodes in buckets.
+// Nodes are grouped by tentative distance [i*delta, (i+1)*delta).
+// 
+// Key patterns from alg_closure_v2.hvm4:
+// 1. Binary trees via <>: list construction and traversal
+// 2. DUP memoization with !: share computation results
+// 3. Recursive param reuse: efficient tail-recursive iteration
+//
+// Algorithm:
+// - Process lightest non-empty bucket
+// - Relax light edges (w < delta) → same bucket iteration
+// - Relax heavy edges (w >= delta) → future buckets
+// - Repeat until all buckets empty
+
+@INF = 999
+@DELTA = 5  // Bucket width
+
+// ---- Weighted Edge: (src, dst, weight) ----
+
+@Edge = λsrc. λdst. λweight. λf. f(src)(dst)(weight)
+
+@get_src = λedge. edge(λsrc. λdst. λw. src)
+@get_dst = λedge. edge(λsrc. λdst. λw. dst)
+@get_weight = λedge. edge(λsrc. λdst. λw. w)
+
+// ---- Distance map: list of (node, distance) pairs ----
+
+@dist_lookup = λ&node. λ{
+  []: @INF;
+  <>: λpair. λ&rest.
+    λ{
+      []: @dist_lookup(node)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          []: @dist_lookup(node)(rest);
+          <>: λ&d. λtmp.
+            λ{0: @dist_lookup(node)(rest); λk. d}(n == node)
+        }(tail)
+    }(pair)
+}
+
+@dist_update = λ&node. λ&new_dist. λ{
+  []: [node, new_dist] <> [];
+  <>: λ&pair. λ&rest.
+    λ{
+      []: pair <> @dist_update(node)(new_dist)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          0: pair <> @dist_update(node)(new_dist)(rest);
+          λk. [node, new_dist] <> rest
+        }(n == node)
+    }(pair)
+}
+
+// ---- Bucket operations ----
+// Buckets: list of (bucket_idx, node_list) pairs
+
+@bucket_idx = λdist. λdelta. dist / delta
+
+@bucket_get_idx = λbucket. λ{[]: 0; <>: λidx. λtail. idx}(bucket)
+@bucket_get_nodes = λbucket. λ{[]: []; <>: λidx. λtail. λ{[]: []; <>: λnodes. λr. nodes}(tail)}(bucket)
+
+@bucket_insert = λ&node. λ&dist. λ&delta. λ{
+  []: [@bucket_idx(dist)(delta), node <> []] <> [];
+  <>: λ&bucket. λ&rest.
+    ! &idx = @bucket_get_idx(bucket);
+    ! &target_idx = @bucket_idx(dist)(delta);
+    λ{
+      0:  // Different bucket - continue searching
+        bucket <> @bucket_insert(node)(dist)(delta)(rest);
+      λk.  // Found matching bucket - add node
+        ! &nodes = @bucket_get_nodes(bucket);
+        [idx, node <> nodes] <> rest
+    }(idx == target_idx)
+}
+
+// Get and remove lightest bucket
+@bucket_pop = λ&buckets.
+  λ{
+    []: [[],[],buckets];  // [min_idx, nodes, remaining]
+    <>: λ&bucket. λ&rest.
+      λ{
+        []: [[],[],buckets];
+        <>: λ&idx. λ&tail.
+          λ{
+            []: [[],[],buckets];
+            <>: λ&nodes. λtmp. [idx, nodes, rest]
+          }(tail)
+      }(bucket)
+  }(buckets)
+
+// ---- Get outgoing edges from node ----
+
+@out_edges_acc = λ&node. λ&acc. λ{
+  []: acc;
+  <>: λ&edge. λ&rest.
+    ! &src = @get_src(edge);
+    λ{
+      0: @out_edges_acc(node)(acc)(rest);
+      λk. @out_edges_acc(node)(edge <> acc)(rest)
+    }(src == node)
+}
+
+@out_edges = λnode. λedges. @out_edges_acc(node)([])(edges)
+
+// ---- Min function ----
+
+@min = λ&a. λ&b. λ{0: b; λk. a}(a < b)
+
+// ---- Relax edges ----
+// For each edge from removed nodes, update distances and buckets
+
+@relax_edges = λ&node. λ&node_dist. λ&edges. λ&dists. λ&buckets. λ&delta.
+  ! &out = @out_edges(node)(edges);
+  @relax_list(node_dist)(out)(dists)(buckets)(delta)
+
+@relax_list = λ&src_dist. λ{
+  []: λ&dists. λ&buckets. λ&delta. [dists, buckets];
+  <>: λ&edge. λ&rest. λ&dists. λ&buckets. λ&delta.
+    ! &dst = @get_dst(edge);
+    ! &w = @get_weight(edge);
+    ! &new_dist = src_dist + w;
+    ! &old_dist = @dist_lookup(dst)(dists);
+    λ{
+      0:  // No improvement: new_dist >= old_dist
+        @relax_list(src_dist)(rest)(dists)(buckets)(delta);
+      λk.  // Improvement: new_dist < old_dist
+        ! &dists2 = @dist_update(dst)(new_dist)(dists);
+        ! &buckets2 = @bucket_insert(dst)(new_dist)(delta)(buckets);
+        @relax_list(src_dist)(rest)(dists2)(buckets2)(delta)
+    }(new_dist < old_dist)
+}
+
+// ---- Process one bucket ----
+
+@process_bucket_nodes = λ&nodes. λ&edges. λ&dists. λ&buckets.
+  λ{
+    []: [dists, buckets];
+    <>: λ&node. λ&rest.
+      ! &node_dist = @dist_lookup(node)(dists);
+      ! &result = @relax_edges(node)(node_dist)(edges)(dists)(buckets)(@DELTA);
+      λ{
+        []: [dists, buckets];
+        <>: λ&dists2. λ&tail.
+          λ{
+            []: [dists, buckets];
+            <>: λ&buckets2. λtmp.
+              @process_bucket_nodes(rest)(edges)(dists2)(buckets2)
+          }(tail)
+      }(result)
+  }(nodes)
+
+// ---- Helper to extract from bucket_pop result ----
+
+@get_second = λ{
+  []: [];
+  <>: λh. λ&t. λ{[]: []; <>: λx. λr. x}(t)
+}
+
+@get_third = λ{
+  []: [];
+  <>: λh. λ&t. λ{[]: []; <>: λx. λr. r}(t)
+}
+
+// Extract from [a, b] structure
+@get_first_of_pair = λpair. λ{
+  []: [];
+  <>: λa. λtail. a
+}(pair)
+
+@get_second_of_pair = λpair. λ{
+  []: [];
+  <>: λa. λ&tail. λ{[]: []; <>: λb. λr. b}(tail)
+}(pair)
+
+// ---- Main delta-stepping loop ----
+
+@delta_step = λ&edges. λ&dists. λ&buckets. λ&fuel.
+  λ{
+    0: dists;  // Fuel exhausted
+    λ&f.
+      ! &popped = @bucket_pop(buckets);
+      ! &nodes = @get_second(popped);
+      ! &remaining = @get_third(popped);
+      λ{
+        []: dists;  // No nodes to process
+        <>: λhd. λtl.
+          ! &result = @process_bucket_nodes(nodes)(edges)(dists)(remaining);
+          ! &dists2 = @get_first_of_pair(result);
+          ! &buckets2 = @get_second_of_pair(result);
+          @delta_step(edges)(dists2)(buckets2)(f)
+      }(nodes)
+  }(fuel)
+
+// ---- Initialize: start node → bucket 0 ----
+
+@init_sssp = λ&start.
+  [[start, 0] <> [], [[0, start <> []] <> []]]
+
+// ---- Test graph ----
+// 0->1: 2, 0->3: 10
+// 1->2: 3
+// 2->3: 1
+// Expected from 0: {0:0, 1:2, 2:5, 3:6}
+
+@test_edges =
+  @Edge(0)(1)(2) <> 
+  @Edge(0)(3)(10) <> 
+  @Edge(1)(2)(3) <> 
+  @Edge(2)(3)(1) <> 
+  []
+
+@main =
+  ! &init = @init_sssp(0);
+  λ{
+    []: [];
+    <>: λ&dists. λ&tail.
+      λ{
+        []: [];
+        <>: λ&buckets. λtmp.
+          @delta_step(@test_edges)(dists)(buckets)(20)
+      }(tail)
+  }(init)
+
+// Expected: [[0,0], [1,2], [2,5], [3,6]]

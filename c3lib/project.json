@@ -17,6 +17,10 @@
     "test": {
       "type": "executable",
       "sources": ["src/**", "test/**"]
+    },
+    "bench": {
+      "type": "executable",
+      "sources": ["src/**", "bench/**"]
     }
   }
 }

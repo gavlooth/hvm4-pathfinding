@@ -1,0 +1,29 @@
+// Test bucket insertion
+
+@DELTA = 5
+@bucket_idx = λdist. λdelta. dist / delta
+
+@bucket_get_idx = λbucket. λ{[]: 0; <>: λidx. λtail. idx}(bucket)
+@bucket_get_nodes = λbucket. λ{[]: []; <>: λidx. λtail. λ{[]: []; <>: λnodes. λr. nodes}(tail)}(bucket)
+
+@bucket_insert = λ&node. λ&dist. λ&delta. λ{
+  []: [@bucket_idx(dist)(delta), node <> []] <> [];
+  <>: λ&bucket. λ&rest.
+    ! &idx = @bucket_get_idx(bucket);
+    ! &target_idx = @bucket_idx(dist)(delta);
+    λ{
+      0:  // Found matching bucket - add node
+        ! &nodes = @bucket_get_nodes(bucket);
+        [idx, node <> nodes] <> rest;
+      λk.  // Different bucket - continue searching
+        bucket <> @bucket_insert(node)(dist)(delta)(rest)
+    }(idx == target_idx)
+}
+
+@main =
+  ! &b1 = @bucket_insert(0)(0)(@DELTA)([]);
+  ! &b2 = @bucket_insert(1)(2)(@DELTA)(b1);
+  ! &b3 = @bucket_insert(3)(10)(@DELTA)(b2);
+  b3
+
+// Expected: [[2, [3]], [0, [1, 0]]] or similar

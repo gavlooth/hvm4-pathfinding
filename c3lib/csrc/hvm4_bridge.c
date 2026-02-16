@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <math.h>
 
 // HEAP_CAP is capped at 1<<32 (32 GB) — HVM4 uses u32 for heap locations.
 // This is the hard architectural limit until HVM4 switches to u64 indices.
@@ -162,6 +163,114 @@ void hvm4_graph_setup(uint32_t *row_ptr, uint32_t *col_idx,
 }
 
 // ---------------------------------------------------------------------------
+// Weather FFI: edge cost computation in C (trig requires doubles)
+// ---------------------------------------------------------------------------
+
+static uint32_t  g_weather_edge_count;
+static double   *g_edge_dist_m;          // [E] haversine distance per edge
+static double   *g_edge_heading;         // [E] bearing in degrees
+static double   *g_weather_wind_speed;   // [E] sampled at edge midpoint
+static double   *g_weather_wind_dir;     // [E]
+static double   *g_weather_wave_height;  // [E]
+static double   *g_weather_current_speed;// [E]
+static double   *g_weather_current_dir;  // [E]
+static double    g_ship_base_speed;
+static double    g_ship_max_wave_ht;
+static double    g_ship_fuel_base;
+static double    g_ship_fuel_per_kt;
+static uint32_t  g_cost_mode;            // 0=time, 1=fuel, 2=weighted, 3=safety
+static double    g_cost_alpha;
+static double    g_cost_safety_penalty;
+static uint32_t  g_cost_scale;
+
+static const double NM_TO_M = 1852.0;
+static const double DEG_TO_RAD_C = 3.14159265358979323846 / 180.0;
+
+// %edge_cost(edge_id) → NUM: compute weather-adjusted cost for one edge
+static Term prim_edge_cost(Term *args) {
+  Term id_term = wnf(args[0]);
+  uint32_t i = term_val(id_term);
+  if (i >= g_weather_edge_count) return term_new_num(1);
+
+  double dist_m     = g_edge_dist_m[i];
+  double heading    = g_edge_heading[i];
+  double wind_speed = g_weather_wind_speed[i];
+  double wind_dir   = g_weather_wind_dir[i];
+  double wave_ht    = g_weather_wave_height[i];
+  double cur_speed  = g_weather_current_speed[i];
+  double cur_dir    = g_weather_current_dir[i];
+
+  // Wave reduction factor
+  double wave_ratio = wave_ht / g_ship_max_wave_ht;
+  if (wave_ratio > 1.0) wave_ratio = 1.0;
+  double reduction = 1.0 - 0.5 * wave_ratio * wave_ratio;
+  if (reduction < 0.1) reduction = 0.1;
+  if (reduction > 1.0) reduction = 1.0;
+
+  // Current along heading
+  double current_angle = (cur_dir - heading) * DEG_TO_RAD_C;
+  double current_along = cur_speed * cos(current_angle) * 1.94384;
+
+  // Effective speed
+  double eff_speed = g_ship_base_speed * reduction + current_along;
+  if (eff_speed < 0.1) eff_speed = 0.1;
+
+  // Time and fuel
+  double dist_nm = dist_m / NM_TO_M;
+  double time_h  = dist_nm / eff_speed;
+  double fuel    = time_h * (g_ship_fuel_base + g_ship_fuel_per_kt * eff_speed);
+
+  // Cost based on mode
+  double cost;
+  if (g_cost_mode == 0) {          // TIME_ONLY
+    cost = time_h;
+  } else if (g_cost_mode == 1) {   // FUEL_ONLY
+    cost = fuel;
+  } else if (g_cost_mode == 2) {   // WEIGHTED_SUM
+    cost = g_cost_alpha * time_h + (1.0 - g_cost_alpha) * fuel;
+  } else {                         // SAFETY_PENALIZED
+    cost = g_cost_alpha * time_h + (1.0 - g_cost_alpha) * fuel;
+    if (wave_ht > g_ship_max_wave_ht) {
+      cost += g_cost_safety_penalty;
+    }
+  }
+
+  // Scale to integer and clamp
+  uint32_t weight = (uint32_t)(cost * (double)g_cost_scale);
+  if (weight < 1)      weight = 1;
+  if (weight > 900000) weight = 900000;
+  return term_new_num(weight);
+}
+
+// Called AFTER hvm4_lib_reset(), BEFORE hvm4_run()
+void hvm4_weather_setup(
+    double *dist_m, double *heading,
+    double *wind_speed, double *wind_dir, double *wave_height,
+    double *current_speed, double *current_dir,
+    double base_speed, double max_wave_ht, double fuel_base, double fuel_per_kt,
+    uint32_t cost_mode, double alpha, double safety_penalty, uint32_t scale,
+    uint32_t edge_count)
+{
+  g_edge_dist_m            = dist_m;
+  g_edge_heading           = heading;
+  g_weather_wind_speed     = wind_speed;
+  g_weather_wind_dir       = wind_dir;
+  g_weather_wave_height    = wave_height;
+  g_weather_current_speed  = current_speed;
+  g_weather_current_dir    = current_dir;
+  g_ship_base_speed        = base_speed;
+  g_ship_max_wave_ht       = max_wave_ht;
+  g_ship_fuel_base         = fuel_base;
+  g_ship_fuel_per_kt       = fuel_per_kt;
+  g_cost_mode              = cost_mode;
+  g_cost_alpha             = alpha;
+  g_cost_safety_penalty    = safety_penalty;
+  g_cost_scale             = scale;
+  g_weather_edge_count     = edge_count;
+  prim_register("edge_cost", 9, 1, prim_edge_cost);
+}
+
+// ---------------------------------------------------------------------------
 // extract_nums: recursively extract NUM values from a result term
 // ---------------------------------------------------------------------------
 //
@@ -298,4 +407,30 @@ int hvm4_run(const char *source, int collapse_limit, uint32_t *out, int max_out)
     Term result = eval_normalize(main_ref);
     return extract_nums(result, out, 0, max_out);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge wrappers: expose HVM4 static-inline functions as linkable symbols
+// so C3 modules can call them and pass C3 functions as FFI primitive callbacks.
+// ---------------------------------------------------------------------------
+
+Term hvm4_wnf(Term term) {
+  return wnf(term);
+}
+
+uint32_t hvm4_term_val(Term term) {
+  return term_val(term);
+}
+
+Term hvm4_term_new_num(uint32_t n) {
+  return term_new_num(n);
+}
+
+uint32_t hvm4_prim_register_ext(const char *name, uint32_t len,
+                                uint32_t arity, Term (*handler)(Term *args)) {
+  return prim_register(name, len, arity, handler);
+}
+
+uint64_t hvm4_itrs_total(void) {
+  return wnf_itrs_total();
 }

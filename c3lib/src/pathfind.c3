@@ -2,6 +2,8 @@ module pathfind;
 import std::collections;
 import std::core::dstring;
 import std::io;
+import std::math;
+import libc;
 
 const uint INF = 999_999;
 
@@ -14,6 +16,14 @@ extern fn void hvm4_lib_cleanup() @cname("hvm4_lib_cleanup");
 extern fn void hvm4_lib_reset() @cname("hvm4_lib_reset");
 extern fn int hvm4_run(char* source, int collapse_limit, uint* out, int max_out) @cname("hvm4_run");
 extern fn void hvm4_graph_setup(uint* row_ptr, uint* col_idx, uint* weight, uint v) @cname("hvm4_graph_setup");
+extern fn void hvm4_weather_setup(
+    double* dist_m, double* heading,
+    double* wind_speed, double* wind_dir, double* wave_height,
+    double* current_speed, double* current_dir,
+    double base_speed, double max_wave_ht, double fuel_base, double fuel_per_kt,
+    uint cost_mode, double alpha, double safety_penalty, uint scale,
+    uint edge_count
+) @cname("hvm4_weather_setup");
 
 // ----- Data types -----
 
@@ -32,6 +42,305 @@ struct Graph {
 struct PathResult {
     uint[] weights;
     usz    count;
+}
+
+// ----- Geography primitives -----
+
+const double PI = 3.14159265358979323846;
+const double EARTH_RADIUS_M = 6_371_000.0;
+const double DEG_TO_RAD = PI / 180.0;
+const double RAD_TO_DEG = 180.0 / PI;
+
+struct LatLon {
+    double lat;
+    double lon;
+}
+
+fn double haversine(LatLon a, LatLon b) {
+    double dlat = (b.lat - a.lat) * DEG_TO_RAD;
+    double dlon = (b.lon - a.lon) * DEG_TO_RAD;
+    double la = a.lat * DEG_TO_RAD;
+    double lb = b.lat * DEG_TO_RAD;
+    double s = math::sin(dlat / 2.0);
+    double c = math::sin(dlon / 2.0);
+    double h = s * s + math::cos(la) * math::cos(lb) * c * c;
+    return 2.0 * EARTH_RADIUS_M * math::asin(math::sqrt(h));
+}
+
+fn double bearing(LatLon a, LatLon b) {
+    double la = a.lat * DEG_TO_RAD;
+    double lb = b.lat * DEG_TO_RAD;
+    double dlon = (b.lon - a.lon) * DEG_TO_RAD;
+    double y = math::sin(dlon) * math::cos(lb);
+    double x = math::cos(la) * math::sin(lb) - math::sin(la) * math::cos(lb) * math::cos(dlon);
+    double brg = math::atan2(y, x) * RAD_TO_DEG;
+    if (brg < 0.0) brg += 360.0;
+    return brg;
+}
+
+fn uint haversine_u32(LatLon a, LatLon b) {
+    return (uint)haversine(a, b);
+}
+
+// ----- GeoGraph -----
+
+struct GeoGraph {
+    Graph graph;
+    LatLon[] coords;
+    uint node_count;
+    uint capacity;
+}
+
+fn void GeoGraph.init(&self, uint capacity) {
+    self.graph.init(capacity);
+    self.coords = mem::new_array(LatLon, capacity);
+    self.node_count = 0;
+    self.capacity = capacity;
+}
+
+fn void GeoGraph.destroy(&self) {
+    self.graph.destroy();
+    if (self.coords.ptr != null) free(self.coords.ptr);
+}
+
+fn uint GeoGraph.add_node(&self, double lat, double lon) {
+    uint id = self.node_count;
+    self.coords[id] = (LatLon){ .lat = lat, .lon = lon };
+    self.node_count++;
+    return id;
+}
+
+fn void GeoGraph.add_edge(&self, uint from, uint to, uint weight) {
+    self.graph.add_edge(from, to, weight);
+}
+
+fn void GeoGraph.add_geo_edge(&self, uint from, uint to) {
+    uint w = haversine_u32(self.coords[from], self.coords[to]);
+    if (w < 1) w = 1;
+    self.graph.add_edge(from, to, w);
+}
+
+fn void GeoGraph.add_geo_biedge(&self, uint a, uint b) {
+    uint w = haversine_u32(self.coords[a], self.coords[b]);
+    if (w < 1) w = 1;
+    self.graph.add_biedge(a, b, w);
+}
+
+fn uint GeoGraph.nearest_node(&self, double lat, double lon) {
+    LatLon target = { .lat = lat, .lon = lon };
+    uint best = 0;
+    double best_dist = 1e18;
+    for (uint i = 0; i < self.node_count; i++) {
+        double d = haversine(target, self.coords[i]);
+        if (d < best_dist) {
+            best_dist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+fn void GeoGraph.connect_knn(&self, uint k) {
+    uint n = self.node_count;
+    double[] dists = mem::new_array(double, n);
+    uint[] indices = mem::new_array(uint, n);
+    defer { free(dists.ptr); free(indices.ptr); }
+
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < n; j++) {
+            dists[j] = haversine(self.coords[i], self.coords[j]);
+            indices[j] = j;
+        }
+        dists[i] = 1e18;
+
+        uint found = 0;
+        for (uint pass = 0; pass < n - 1 && found < k; pass++) {
+            uint min_idx = pass;
+            for (uint q = pass + 1; q < n; q++) {
+                if (dists[q] < dists[min_idx]) min_idx = q;
+            }
+            double tmp_d = dists[pass]; dists[pass] = dists[min_idx]; dists[min_idx] = tmp_d;
+            uint tmp_i = indices[pass]; indices[pass] = indices[min_idx]; indices[min_idx] = tmp_i;
+
+            uint j = indices[pass];
+            double dist = dists[pass];
+            if (dist >= 1e17) break;
+
+            self.add_geo_biedge(i, j);
+            found++;
+        }
+    }
+}
+
+fn void GeoGraph.connect_radius(&self, double radius_m) {
+    uint n = self.node_count;
+    for (uint i = 0; i < n; i++) {
+        for (uint j = i + 1; j < n; j++) {
+            double d = haversine(self.coords[i], self.coords[j]);
+            if (d <= radius_m) {
+                uint w = (uint)d;
+                if (w < 1) w = 1;
+                self.graph.add_biedge(i, j, w);
+            }
+        }
+    }
+}
+
+// ----- GeoGraph file loader -----
+
+extern fn CFile fopen(ZString path, ZString mode) @cname("fopen");
+extern fn int fclose(CFile f) @cname("fclose");
+extern fn int fscanf(CFile f, ZString fmt, ...) @cname("fscanf");
+extern fn char* fgets(char* buf, int size, CFile f) @cname("fgets");
+
+fn GeoGraph? load_geo_file(ZString path) {
+    CFile f = fopen(path, "r");
+    if (f == null) return HVM_ERROR~;
+
+    char[256] line_buf;
+    uint node_count = 0;
+    uint edge_count = 0;
+
+    // Read NODES header
+    while (fgets(&line_buf, 256, f) != null) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n') continue;
+        if (fscanf(f, "") >= 0) {} // consume
+        // Try to parse "NODES <n>"
+        int scanned = fscanf(f, "");
+        // Rewind — just use sscanf approach via manual parse
+        break;
+    }
+
+    // Simpler: rewind and use fscanf directly
+    fclose(f);
+    f = fopen(path, "r");
+    if (f == null) return HVM_ERROR~;
+    defer fclose(f);
+
+    // Skip comment lines, find NODES
+    while (fgets(&line_buf, 256, f) != null) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n' || line_buf[0] == '\r') continue;
+        // Check for "NODES"
+        if (line_buf[0] == 'N') {
+            // Parse "NODES <n>"
+            uint n = 0;
+            for (int i = 6; i < 256 && line_buf[i] != 0; i++) {
+                if (line_buf[i] >= '0' && line_buf[i] <= '9') {
+                    n = n * 10 + (uint)(line_buf[i] - '0');
+                }
+            }
+            node_count = n;
+            break;
+        }
+    }
+
+    if (node_count == 0) return HVM_ERROR~;
+
+    GeoGraph geo;
+    geo.init(node_count);
+
+    // Read node coordinates
+    uint nodes_read = 0;
+    while (nodes_read < node_count && fgets(&line_buf, 256, f) != null) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n' || line_buf[0] == '\r') continue;
+        double lat = 0;
+        double lon = 0;
+        if (fscanf(f, "") >= 0) {} // dummy
+        // Parse two doubles from line_buf
+        // Use a simple manual parse
+        int pos = 0;
+        // skip whitespace
+        while (line_buf[pos] == ' ' || line_buf[pos] == '\t') pos++;
+        // parse lat
+        bool neg = false;
+        if (line_buf[pos] == '-') { neg = true; pos++; }
+        double whole = 0;
+        while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+            whole = whole * 10.0 + (double)(line_buf[pos] - '0');
+            pos++;
+        }
+        double frac = 0;
+        double div = 1.0;
+        if (line_buf[pos] == '.') {
+            pos++;
+            while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+                frac = frac * 10.0 + (double)(line_buf[pos] - '0');
+                div *= 10.0;
+                pos++;
+            }
+        }
+        lat = whole + frac / div;
+        if (neg) lat = -lat;
+
+        // skip whitespace/comma
+        while (line_buf[pos] == ' ' || line_buf[pos] == '\t' || line_buf[pos] == ',') pos++;
+
+        // parse lon
+        neg = false;
+        if (line_buf[pos] == '-') { neg = true; pos++; }
+        whole = 0;
+        while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+            whole = whole * 10.0 + (double)(line_buf[pos] - '0');
+            pos++;
+        }
+        frac = 0;
+        div = 1.0;
+        if (line_buf[pos] == '.') {
+            pos++;
+            while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+                frac = frac * 10.0 + (double)(line_buf[pos] - '0');
+                div *= 10.0;
+                pos++;
+            }
+        }
+        lon = whole + frac / div;
+        if (neg) lon = -lon;
+
+        geo.add_node(lat, lon);
+        nodes_read++;
+    }
+
+    // Find EDGES header
+    while (fgets(&line_buf, 256, f) != null) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n' || line_buf[0] == '\r') continue;
+        if (line_buf[0] == 'E') {
+            uint m = 0;
+            for (int i = 6; i < 256 && line_buf[i] != 0; i++) {
+                if (line_buf[i] >= '0' && line_buf[i] <= '9') {
+                    m = m * 10 + (uint)(line_buf[i] - '0');
+                }
+            }
+            edge_count = m;
+            break;
+        }
+    }
+
+    // Read edges
+    uint edges_read = 0;
+    while (edges_read < edge_count && fgets(&line_buf, 256, f) != null) {
+        if (line_buf[0] == '#' || line_buf[0] == '\n' || line_buf[0] == '\r') continue;
+        // Parse two uints: from to
+        int pos = 0;
+        while (line_buf[pos] == ' ' || line_buf[pos] == '\t') pos++;
+        uint from_id = 0;
+        while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+            from_id = from_id * 10 + (uint)(line_buf[pos] - '0');
+            pos++;
+        }
+        while (line_buf[pos] == ' ' || line_buf[pos] == '\t') pos++;
+        uint to_id = 0;
+        while (line_buf[pos] >= '0' && line_buf[pos] <= '9') {
+            to_id = to_id * 10 + (uint)(line_buf[pos] - '0');
+            pos++;
+        }
+
+        if (from_id < geo.node_count && to_id < geo.node_count) {
+            geo.add_geo_edge(from_id, to_id);
+        }
+        edges_read++;
+    }
+
+    return geo;
 }
 
 // ----- Graph lifecycle -----
@@ -92,399 +401,47 @@ fn uint ceil_log2(uint n) {
 }
 
 // ============================================================
-// Helper: compute ceil(log16(n)) for radix-16 trie depth
+// Helper: emit tree operations for Bend-style parallel code
+//   @tz — tree zip (element-wise op on two same-shape trees)
+//   @tf — tree fold (parallel reduction)
+//   @tm — tree map (apply f to every leaf)
+//   @tg — tree get (extract element at index)
+//   @bld — bifurcation builder (build tree from index→value fn)
+//   @bld_inf — build tree of all @INF
 // ============================================================
 
-fn uint ceil_log16(uint n) {
-    if (n <= 16) return 1;
-    uint depth = 1;
-    uint cap = 16;
-    while (cap < n) {
-        depth++;
-        cap *= 16;
-    }
-    return depth;
-}
-
-// ============================================================
-// Helper: compute ceil(log4(n)) for radix-4 trie depth
-// ============================================================
-
-fn uint ceil_log4(uint n) {
-    if (n <= 4) return 1;
-    uint depth = 1;
-    uint cap = 4;
-    while (cap < n) { depth++; cap *= 4; }
-    return depth;
-}
-
-// ============================================================
-// Helper: emit radix-16 trie definitions (trie_get/set/set_slot)
-// ============================================================
-
-fn void emit_trie_defs(DStr* ds) {
-    // trie_get: O(log16(V)) lookup, returns @INF for missing keys
-    ds.append_string("@trie_get = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{#HE: @INF; #HL: \xce\xbbval. val; #H: \xce\xbbc0.\xce\xbbc1.\xce\xbbc2.\xce\xbbc3.\xce\xbbc4.\xce\xbbc5.\xce\xbbc6.\xce\xbbc7.\xce\xbbc8.\xce\xbbc9.\xce\xbbc10.\xce\xbbc11.\xce\xbbc12.\xce\xbbc13.\xce\xbbc14.\xce\xbbc15.");
-    ds.append_string(" ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1;");
-    ds.append_string(" \xce\xbb{0: @trie_get(next,nd,c0); 1: @trie_get(next,nd,c1); 2: @trie_get(next,nd,c2); 3: @trie_get(next,nd,c3);");
-    ds.append_string(" 4: @trie_get(next,nd,c4); 5: @trie_get(next,nd,c5); 6: @trie_get(next,nd,c6); 7: @trie_get(next,nd,c7);");
-    ds.append_string(" 8: @trie_get(next,nd,c8); 9: @trie_get(next,nd,c9); 10: @trie_get(next,nd,c10); 11: @trie_get(next,nd,c11);");
-    ds.append_string(" 12: @trie_get(next,nd,c12); 13: @trie_get(next,nd,c13); 14: @trie_get(next,nd,c14); \xce\xbbn. @trie_get(next,nd,c15)}(slot)}\n");
-
-    // trie_set: O(log16(V)) insert/update
-    ds.append_string("@trie_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{#HL: \xce\xbbold. #HL{val};");
-    ds.append_string(" #HE: \xce\xbb{0: #HL{val}; \xce\xbbn. ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1; ! &leaf = @trie_set(next, val, nd, #HE{}); @trie_set_slot(slot, leaf)}(depth);");
-    ds.append_string(" #H: \xce\xbb&c0.\xce\xbb&c1.\xce\xbb&c2.\xce\xbb&c3.\xce\xbb&c4.\xce\xbb&c5.\xce\xbb&c6.\xce\xbb&c7.\xce\xbb&c8.\xce\xbb&c9.\xce\xbb&c10.\xce\xbb&c11.\xce\xbb&c12.\xce\xbb&c13.\xce\xbb&c14.\xce\xbb&c15.");
-    ds.append_string(" ! &slot = key % 16; ! &next = key / 16; ! &nd = depth - 1;");
-    ds.append_string(" \xce\xbb{0: #H{@trie_set(next,val,nd,c0),c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 1: #H{c0,@trie_set(next,val,nd,c1),c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 2: #H{c0,c1,@trie_set(next,val,nd,c2),c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 3: #H{c0,c1,c2,@trie_set(next,val,nd,c3),c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 4: #H{c0,c1,c2,c3,@trie_set(next,val,nd,c4),c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 5: #H{c0,c1,c2,c3,c4,@trie_set(next,val,nd,c5),c6,c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 6: #H{c0,c1,c2,c3,c4,c5,@trie_set(next,val,nd,c6),c7,c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 7: #H{c0,c1,c2,c3,c4,c5,c6,@trie_set(next,val,nd,c7),c8,c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 8: #H{c0,c1,c2,c3,c4,c5,c6,c7,@trie_set(next,val,nd,c8),c9,c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 9: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,@trie_set(next,val,nd,c9),c10,c11,c12,c13,c14,c15};");
-    ds.append_string(" 10: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,@trie_set(next,val,nd,c10),c11,c12,c13,c14,c15};");
-    ds.append_string(" 11: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,@trie_set(next,val,nd,c11),c12,c13,c14,c15};");
-    ds.append_string(" 12: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,@trie_set(next,val,nd,c12),c13,c14,c15};");
-    ds.append_string(" 13: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,@trie_set(next,val,nd,c13),c14,c15};");
-    ds.append_string(" 14: #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,@trie_set(next,val,nd,c14),c15};");
-    ds.append_string(" \xce\xbbn. #H{c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14,@trie_set(next,val,nd,c15)}}(slot)}\n");
-
-    // trie_set_slot: create fresh 16-way branch with one child set
-    ds.append_string("@trie_set_slot = \xce\xbb&slot. \xce\xbb&child. \xce\xbb{");
-    ds.append_string("0: #H{child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("1: #H{#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("2: #H{#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("3: #H{#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("4: #H{#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("5: #H{#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("6: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("7: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("8: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("9: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("10: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("11: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{},#HE{}}; ");
-    ds.append_string("12: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{},#HE{}}; ");
-    ds.append_string("13: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{},#HE{}}; ");
-    ds.append_string("14: #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child,#HE{}}; ");
-    ds.append_string("\xce\xbbn. #H{#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},#HE{},child}}(slot)\n");
-}
-
-// ============================================================
-// 1. Bellman-Ford SSSP
-//    Generates HVM4 source with assoc-list helpers and edge
-//    relaxation, calls hvm4_run(), extracts results.
-// ============================================================
-
-fn uint[]? bellman_ford(Graph* g, uint source) {
-    uint n = g.n;
-    if (source >= n) return INVALID_NODE~;
-
-    hvm4_lib_reset();
-
-    DStr ds = new_dstr();
-    defer ds.free();
-
-    uint depth = ceil_log16(n);
-
-    // --- Constants ---
-    ds.append_string("@INF = 999999\n");
-    ds.appendf("@DEPTH = %d\n", depth);
-
-    // --- Trie definitions ---
-    emit_trie_defs(&ds);
-
-    // --- Helpers ---
-    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @trie_get(u, @DEPTH, dist); ! &new_d = du + w; ! &dv = @trie_get(v, @DEPTH, dist); \xce\xbb{0: dist; \xce\xbbn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)}\n");
-    ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
-    ds.append_string("@relax_round = \xce\xbbdist. @foldl(@relax_edge, dist, @edges)\n");
-    ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
-
-    // --- Generated edge list ---
-    ds.append_string("@edges = [");
-    bool first = true;
-    for (uint u = 0; u < n; u++) {
-        for (usz j = 0; j < g.adj[u].len(); j++) {
-            Edge e = g.adj[u][j];
-            if (!first) ds.append_string(", ");
-            ds.appendf("#E3{%d,%d,%d}", u, e.to, e.weight);
-            first = false;
-        }
-    }
-    ds.append_string("]\n");
-
-    // --- Initial distance (trie) ---
-    ds.appendf("@init_dist = @trie_set(%d, 0, @DEPTH, #HE{})\n", source);
-
-    // --- Run V-1 rounds ---
-    uint rounds = n > 1 ? n - 1 : 1;
-    ds.appendf("@bf = @repeat(@relax_round, @init_dist, %d)\n", rounds);
-
-    // --- Extract results (trie) ---
-    ds.append_string("@main = [");
-    for (uint i = 0; i < n; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.appendf("@trie_get(%d, @DEPTH, @bf)", i);
-    }
-    ds.append_string("]\n");
-
-    // --- Run HVM4 ---
-    uint[] out_buf = mem::new_array(uint, n);
-    int count = hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)n);
-
-    if (count < 0) {
-        free(out_buf.ptr);
-        return HVM_ERROR~;
-    }
-
-    return out_buf;
-}
-
-// ============================================================
-// 2. Delta-Stepping SSSP
-//    Light/heavy edge classification with repeated relaxation.
-// ============================================================
-
-fn uint[]? delta_stepping(Graph* g, uint source, uint delta) {
-    uint n = g.n;
-    if (source >= n) return INVALID_NODE~;
-
-    hvm4_lib_reset();
-
-    DStr ds = new_dstr();
-    defer ds.free();
-
-    uint depth = ceil_log16(n);
-
-    // --- Constants ---
-    ds.append_string("@INF = 999999\n");
-    ds.appendf("@DEPTH = %d\n", depth);
-
-    // --- Trie definitions ---
-    emit_trie_defs(&ds);
-
-    // --- Helpers ---
-    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @trie_get(u, @DEPTH, dist); ! &new_d = du + w; ! &dv = @trie_get(v, @DEPTH, dist); \xce\xbb{0: dist; \xce\xbbn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)}\n");
-    ds.append_string("@relax_list = \xce\xbb&dist. \xce\xbb{[]: dist; <>: \xce\xbbh. \xce\xbbt. @relax_list(@relax_edge(dist, h), t)}\n");
-    ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
-
-    // --- Light and heavy edge lists ---
-    ds.append_string("@light_edges = [");
-    bool first_l = true;
-    for (uint u = 0; u < n; u++) {
-        for (usz j = 0; j < g.adj[u].len(); j++) {
-            Edge e = g.adj[u][j];
-            if (e.weight <= delta) {
-                if (!first_l) ds.append_string(", ");
-                ds.appendf("#E3{%d, %d, %d}", u, e.to, e.weight);
-                first_l = false;
-            }
-        }
-    }
-    ds.append_string("]\n");
-
-    ds.append_string("@heavy_edges = [");
-    bool first_h = true;
-    for (uint u = 0; u < n; u++) {
-        for (usz j = 0; j < g.adj[u].len(); j++) {
-            Edge e = g.adj[u][j];
-            if (e.weight > delta) {
-                if (!first_h) ds.append_string(", ");
-                ds.appendf("#E3{%d, %d, %d}", u, e.to, e.weight);
-                first_h = false;
-            }
-        }
-    }
-    ds.append_string("]\n");
-
-    // --- One delta-stepping round ---
-    ds.append_string("@one_round = \xce\xbbdist. ! &d1 = @relax_list(dist, @light_edges); ! &d2 = @relax_list(d1, @light_edges); @relax_list(d2, @heavy_edges)\n");
-
-    // --- Initial distance (trie) ---
-    ds.appendf("@init_dist = @trie_set(%d, 0, @DEPTH, #HE{})\n", source);
-
-    // --- Run V-1 rounds ---
-    uint rounds = n > 1 ? n - 1 : 1;
-    ds.appendf("@result = @repeat(@one_round, @init_dist, %d)\n", rounds);
-
-    // --- Extract results (trie) ---
-    ds.append_string("@main = [");
-    for (uint i = 0; i < n; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.appendf("@trie_get(%d, @DEPTH, @result)", i);
-    }
-    ds.append_string("]\n");
-
-    // --- Run HVM4 ---
-    uint[] out_buf = mem::new_array(uint, n);
-    int count = hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)n);
-
-    if (count < 0) {
-        free(out_buf.ptr);
-        return HVM_ERROR~;
-    }
-
-    return out_buf;
-}
-
-// ============================================================
-// 3. Bidirectional BFS
-//    Alternating frontier expansion; unweighted distance.
-// ============================================================
-
-fn uint? bidir_bfs(Graph* g, uint source, uint target) {
-    if (source >= g.n || target >= g.n) return INVALID_NODE~;
-    if (source == target) return 0;
-
-    uint n = g.n;
-
-    hvm4_lib_reset();
-
-    DStr ds = new_dstr();
-    defer ds.free();
-
-    // --- Adjacency function ---
-    ds.append_string("@adj = \xce\xbb{");
-    for (uint u = 0; u < n; u++) {
-        ds.appendf("%d: [", u);
-        for (usz j = 0; j < g.adj[u].len(); j++) {
-            if (j > 0) ds.append_string(", ");
-            ds.appendf("%d", g.adj[u][j].to);
-        }
-        ds.append_string("]; ");
-    }
-    ds.append_string("\xce\xbbn. []}\n");
-
-    // --- Helpers ---
-    ds.append_string("@member = \xce\xbb&x. \xce\xbb{[]: 0; <>: \xce\xbb&h. \xce\xbbt. \xce\xbb{0: @member(x, t); \xce\xbbn. 1}(h == x)}\n");
-    ds.append_string("@any_in = \xce\xbb&ys. \xce\xbb{[]: 0; <>: \xce\xbb&h. \xce\xbbt. \xce\xbb{0: @any_in(ys, t); \xce\xbbn. 1}(@member(h, ys))}\n");
-    ds.append_string("@append = \xce\xbb{[]: \xce\xbbys. ys; <>: \xce\xbbh. \xce\xbbt. \xce\xbbys. h <> @append(t, ys)}\n");
-    ds.append_string("@concat_map = \xce\xbb&f. \xce\xbb{[]: []; <>: \xce\xbbh. \xce\xbbt. @append(f(h), @concat_map(f, t))}\n");
-    ds.append_string("@expand = \xce\xbbfrontier. @concat_map(@adj, frontier)\n");
-
-    // --- BFS ---
-    uint max_d = n * 2;
-    ds.append_string("@bfs = \xce\xbb&fwd. \xce\xbb&bwd. \xce\xbb&dist. \xce\xbb&max. \xce\xbb{0: \xce\xbb{0: ! &new_fwd = @expand(fwd); @bfs(bwd, new_fwd, dist + 1, max); \xce\xbbn. dist}(@any_in(bwd, fwd)); \xce\xbbn. 999}(dist > max)\n");
-
-    ds.appendf("@main = @bfs([%d], [%d], 0, %d)\n", source, target, max_d);
-
-    // --- Run HVM4 ---
-    uint[1] out_buf;
-    int count = hvm4_run(ds.zstr_view(), 0, &out_buf[0], 1);
-
-    if (count < 0) return HVM_ERROR~;
-
-    uint result = out_buf[0];
-    if (result >= 999) return NO_PATH~;
-    return result;
-}
-
-// ============================================================
-// 4. Contraction Hierarchy Query
-//    Bidirectional upward-only relaxation, meet in middle.
-// ============================================================
-
-fn uint? contraction_query(Graph* fwd_g, Graph* bwd_g, uint source, uint target, uint node_count) {
-    if (source >= node_count || target >= node_count) return INVALID_NODE~;
-
-    hvm4_lib_reset();
-
-    DStr ds = new_dstr();
-    defer ds.free();
-
-    uint n = node_count;
-    uint depth = ceil_log16(n);
-
-    // --- Constants ---
-    ds.append_string("@INF = 999999\n");
-    ds.appendf("@DEPTH = %d\n", depth);
-
-    // --- Trie definitions ---
-    emit_trie_defs(&ds);
-
-    // --- Helpers ---
-    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
-
-    // --- Forward adjacency ---
-    ds.append_string("@fwd_adj = \xce\xbb{");
-    for (uint u = 0; u < n; u++) {
-        if (fwd_g.adj[u].len() > 0) {
-            ds.appendf("%d: [", u);
-            for (usz j = 0; j < fwd_g.adj[u].len(); j++) {
-                if (j > 0) ds.append_string(", ");
-                Edge e = fwd_g.adj[u][j];
-                ds.appendf("#E{%d, %d}", e.to, e.weight);
-            }
-            ds.append_string("]; ");
-        }
-    }
-    ds.append_string("\xce\xbbn. []}\n");
-
-    // --- Backward adjacency ---
-    ds.append_string("@bwd_adj = \xce\xbb{");
-    for (uint u = 0; u < n; u++) {
-        if (bwd_g.adj[u].len() > 0) {
-            ds.appendf("%d: [", u);
-            for (usz j = 0; j < bwd_g.adj[u].len(); j++) {
-                if (j > 0) ds.append_string(", ");
-                Edge e = bwd_g.adj[u][j];
-                ds.appendf("#E{%d, %d}", e.to, e.weight);
-            }
-            ds.append_string("]; ");
-        }
-    }
-    ds.append_string("\xce\xbbn. []}\n");
-
-    // --- relax_edges (trie) ---
-    ds.append_string("@relax_edges = \xce\xbb&src_d. \xce\xbb&dist. \xce\xbb{[]: dist; <>: \xce\xbbh. \xce\xbb&t. \xce\xbb{#E: \xce\xbb&tgt. \xce\xbbw. ! &new_d = src_d + w; ! &old_d = @trie_get(tgt, @DEPTH, dist); \xce\xbb{0: @relax_edges(src_d, dist, t); \xce\xbbn. @relax_edges(src_d, @trie_set(tgt, new_d, @DEPTH, dist), t)}(new_d < old_d)}(h)}\n");
-
-    // --- process_node (trie) ---
-    ds.append_string("@process_node = \xce\xbb&adj_fn. \xce\xbb&dist. \xce\xbb&node. ! &d = @trie_get(node, @DEPTH, dist); \xce\xbb{0: @relax_edges(d, dist, adj_fn(node)); \xce\xbbn. dist}(d == @INF)\n");
-
-    // --- Forward pass: nodes in rank order [0, 1, ..., n-1] ---
-    ds.append_string("@fwd_nodes = [");
-    for (uint i = 0; i < n; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.appendf("%d", i);
-    }
-    ds.append_string("]\n");
-    ds.appendf("@fwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@fwd_adj, dist, node), @trie_set(%d, 0, @DEPTH, #HE{}), @fwd_nodes)\n", source);
-
-    // --- Backward pass: nodes in reverse rank order [n-1, ..., 0] ---
-    ds.append_string("@bwd_nodes = [");
-    for (uint i = n; i > 0; ) {
-        i--;
-        if (i + 1 < n) ds.append_string(", ");
-        ds.appendf("%d", i);
-    }
-    ds.append_string("]\n");
-    ds.appendf("@bwd_dist = @foldl(\xce\xbb&dist. \xce\xbbnode. @process_node(@bwd_adj, dist, node), @trie_set(%d, 0, @DEPTH, #HE{}), @bwd_nodes)\n", target);
-
-    // --- Meet (trie) ---
-    ds.append_string("@all_nodes = [");
-    for (uint i = 0; i < n; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.appendf("%d", i);
-    }
-    ds.append_string("]\n");
-    ds.append_string("@meet = \xce\xbb&fd. \xce\xbb&bd. @foldl(\xce\xbb&best. \xce\xbb&v. ! &df = @trie_get(v, @DEPTH, fd); ! &db = @trie_get(v, @DEPTH, bd); @min(best, df + db), @INF, @all_nodes)\n");
-    ds.append_string("@main = @meet(@fwd_dist, @bwd_dist)\n");
-
-    // --- Run HVM4 ---
-    uint[1] out_buf;
-    int count = hvm4_run(ds.zstr_view(), 0, &out_buf[0], 1);
-
-    if (count < 0) return HVM_ERROR~;
-
-    uint result = out_buf[0];
-    if (result >= INF) return NO_PATH~;
-    return result;
+fn void emit_tree_ops(DStr* ds) {
+    // Tree zip: element-wise operation on two trees of same shape
+    // @tz(0, f, a, b) = f(a, b)  — leaf case
+    // @tz(n, f, #P{al,ar}, #P{bl,br}) = #P{@tz(n-1,f,al,bl), @tz(n-1,f,ar,br)}
+    ds.append_string("@tz = \xce\xbb{0: \xce\xbbf. \xce\xbba. \xce\xbbb. f(a, b); \xce\xbbn. \xce\xbb&f. \xce\xbba. \xce\xbbb. @tz_go(n, f, a, b)}\n");
+    ds.append_string("@tz_go = \xce\xbb&n. \xce\xbb&f. \xce\xbb{#P: \xce\xbb&al. \xce\xbbar. \xce\xbb{#P: \xce\xbbbl. \xce\xbbbr. #P{@tz(n - 1, f, al, bl), @tz(n - 1, f, ar, br)}}}\n");
+
+    // Tree fold: parallel reduction
+    // @tf(0, op, leaf) = leaf
+    // @tf(n, op, #P{l,r}) = op(@tf(n-1,op,l), @tf(n-1,op,r))
+    ds.append_string("@tf = \xce\xbb{0: \xce\xbbop. \xce\xbbleaf. leaf; \xce\xbbn. ! &d = n; \xce\xbb&op. \xce\xbb{#P: \xce\xbbl. \xce\xbbr. op(@tf(d - 1, op, l), @tf(d - 1, op, r))}}\n");
+
+    // Tree map: apply f to every leaf
+    // @tm(0, f, leaf) = f(leaf)
+    // @tm(n, f, #P{l,r}) = #P{@tm(n-1,f,l), @tm(n-1,f,r)}
+    ds.append_string("@tm = \xce\xbb{0: \xce\xbbf. \xce\xbbleaf. f(leaf); \xce\xbbn. ! &d = n; \xce\xbb&f. \xce\xbb{#P: \xce\xbbl. \xce\xbbr. #P{@tm(d - 1, f, l), @tm(d - 1, f, r)}}}\n");
+
+    // Tree get: extract element at index (binary decomposition)
+    // Index bits: bit 0 selects L/R at depth 0, bit 1 at depth 1, etc.
+    // @tg(0, idx, leaf) = leaf
+    // @tg(n, idx, #P{l,r}) = if idx%2==0 then @tg(n-1, idx/2, l) else @tg(n-1, idx/2, r)
+    ds.append_string("@tg = \xce\xbb{0: \xce\xbbidx. \xce\xbbleaf. leaf; \xce\xbbn. \xce\xbb&idx. \xce\xbb{#P: \xce\xbb&l. \xce\xbbr. @tg_sel(idx % 2, idx / 2, n, l, r)}}\n");
+    ds.append_string("@tg_sel = \xce\xbb{0: \xce\xbbidx. \xce\xbbd. \xce\xbbl. \xce\xbbr. @tg(d - 1, idx, l); \xce\xbbm. \xce\xbbidx. \xce\xbbd. \xce\xbbl. \xce\xbbr. @tg(d - 1, idx, r)}\n");
+
+    // Bifurcation builder: build tree of values from index→value function
+    // @bld(0, i, lim, f) = if i<lim then f(i) else @INF
+    // @bld(n, i, lim, f) = #P{@bld(n-1, i*2, lim, f), @bld(n-1, i*2+1, lim, f)}
+    // @bld(d, i, step, lim, f): bit-interleaved layout matching @tg's idx%2 addressing
+    ds.append_string("@bld = \xce\xbb{0: \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&f. \xce\xbb{0: @INF; \xce\xbbm. f(i)}(i < lim); \xce\xbbn. ! &d = n; \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&f. ! &ns = s * 2; #P{@bld(d - 1, i, ns, lim, f), @bld(d - 1, i + s, ns, lim, f)}}\n");
+
+    // Build tree of all @INF (for padding)
+    ds.append_string("@bld_inf = \xce\xbb{0: @INF; \xce\xbbn. ! &d = n; #P{@bld_inf(d - 1), @bld_inf(d - 1)}}\n");
 }
 
 // ============================================================
@@ -500,63 +457,86 @@ fn uint[]? algebraic_apsp(Graph* g) {
     DStr ds = new_dstr();
     defer ds.free();
 
+    uint depth = ceil_log2(n);
+
     // --- Constants ---
     ds.append_string("@INF = 999999\n");
+    ds.appendf("@TD = %d\n", depth);
+    ds.appendf("@N = %d\n", n);
 
     // --- Tropical operations ---
     ds.append_string("@trop_add = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
     ds.append_string("@trop_mul = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: \xce\xbb{0: a + b; \xce\xbbn. @INF}(b == @INF); \xce\xbbn. @INF}(a == @INF)\n");
 
-    // --- List utilities ---
-    ds.append_string("@map = \xce\xbb&f. \xce\xbb{[]: []; <>: \xce\xbbh. \xce\xbbt. f(h) <> @map(f, t)}\n");
-    ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
-    ds.append_string("@zip_with = \xce\xbb&f. \xce\xbbxs. \xce\xbbys. \xce\xbb{[]: []; <>: \xce\xbbhx. \xce\xbbtx. \xce\xbb{[]: []; <>: \xce\xbbhy. \xce\xbbty. f(hx, hy) <> @zip_with(f, tx, ty)}(ys)}(xs)\n");
-    ds.append_string("@nth = \xce\xbb&n. \xce\xbb{[]: 0; <>: \xce\xbb&h. \xce\xbbt. \xce\xbb{0: h; \xce\xbbm. @nth(n - 1, t)}(n)}\n");
-    ds.append_string("@col = \xce\xbb&j. \xce\xbb{[]: []; <>: \xce\xbb&row. \xce\xbbt. @nth(j, row) <> @col(j, t)}\n");
-    ds.append_string("@dot = \xce\xbb&row. \xce\xbb&col. @foldl(\xce\xbb&a. \xce\xbbb. @trop_add(a, b), @INF, @zip_with(\xce\xbba. \xce\xbbb. @trop_mul(a, b), row, col))\n");
+    // --- Tree operations (Bend-style parallel) ---
+    emit_tree_ops(&ds);
 
-    // --- mat_mul: generated dynamically for size N ---
-    ds.append_string("@mat_mul = \xce\xbb&a. \xce\xbb&b. ");
-    for (uint j = 0; j < n; j++) {
-        ds.appendf("! &c%d = @col(%d, b); ", j, j);
-    }
-    ds.append_string("@map(\xce\xbb&r. [");
-    for (uint j = 0; j < n; j++) {
-        if (j > 0) ds.append_string(", ");
-        ds.appendf("@dot(r, c%d)", j);
-    }
-    ds.append_string("], a)\n");
+    // --- Dot product: zip with trop_mul, fold with trop_add ---
+    ds.append_string("@dot = \xce\xbb&row. \xce\xbb&cv. @tf(@TD, \xce\xbba. \xce\xbbb. @trop_add(a, b), @tz(@TD, \xce\xbba. \xce\xbbb. @trop_mul(a, b), row, cv))\n");
 
-    // --- Distance matrix ---
-    // Build NxN initial distance matrix from graph adjacency
-    ds.append_string("@D = [");
+    // --- Extract column j: map over rows, get element j from each ---
+    ds.append_string("@col = \xce\xbb&j. \xce\xbb&mat. @tm(@TD, \xce\xbbrow. @tg(@TD, j, row), mat)\n");
+
+    // --- Build result row using bifurcation (bit-interleaved) ---
+    ds.append_string("@brr = \xce\xbb{0: \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&row. \xce\xbb&B. \xce\xbb{0: @INF; \xce\xbbm. @dot(row, @col(i, B))}(i < lim); \xce\xbbn. ! &d = n; \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&row. \xce\xbb&B. ! &ns = s * 2; #P{@brr(d - 1, i, ns, lim, row, B), @brr(d - 1, i + s, ns, lim, row, B)}}\n");
+
+    // --- Full mat_mul: map over rows of A, build result row for each ---
+    ds.append_string("@mat_mul = \xce\xbb&A. \xce\xbb&B. @tm(@TD, \xce\xbb&row. @brr(@TD, 0, 1, @N, row, B), A)\n");
+
+    // --- Build initial distance matrix as tree ---
+    // Precompute adjacency matrix in C3
+    uint* adj_mat = (uint*)mem::calloc((usz)n * n * uint.sizeof);
+    defer free(adj_mat);
+    for (uint i = 0; i < n * n; i++) adj_mat[i] = INF;
     for (uint i = 0; i < n; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.append_string("[");
-        for (uint j = 0; j < n; j++) {
-            if (j > 0) ds.append_string(", ");
-            if (i == j) {
-                ds.append_string("0");
-            } else {
-                // Find edge weight from i to j (or INF)
-                uint w = INF;
-                for (usz k = 0; k < g.adj[i].len(); k++) {
-                    Edge e = g.adj[i][k];
-                    if (e.to == j && e.weight < w) {
-                        w = e.weight;
-                    }
-                }
-                ds.appendf("%d", w);
+        adj_mat[i * n + i] = 0;
+        for (usz k = 0; k < g.adj[i].len(); k++) {
+            Edge e = g.adj[i][k];
+            if (e.weight < adj_mat[i * n + e.to]) {
+                adj_mat[i * n + e.to] = e.weight;
             }
         }
-        ds.append_string("]");
     }
-    ds.append_string("]\n");
+
+    // Emit row value lookup: @rv_i = switch on column index
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("@rv_%d = \xce\xbb{", i);
+        for (uint j = 0; j < n; j++) {
+            ds.appendf("%d: %d; ", j, adj_mat[i * n + j]);
+        }
+        ds.appendf("\xce\xbbn. @INF}\n");
+    }
+
+    // Emit row builders using bifurcation
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("@row_%d = @bld(@TD, 0, 1, @N, @rv_%d)\n", i, i);
+    }
+
+    // Matrix row lookup: switch on row index
+    ds.append_string("@mrv = \xce\xbb{");
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("%d: @row_%d; ", i, i);
+    }
+    ds.append_string("\xce\xbbn. @bld_inf(@TD)}\n");
+
+    // Build matrix tree via bifurcation over rows
+    ds.append_string("@D_init = @bld(@TD, 0, 1, @N, @mrv)\n");
 
     // --- Repeated squaring ---
     uint rounds = ceil_log2(n);
     ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
-    ds.appendf("@main = @repeat(\xce\xbb&m. @mat_mul(m, m), @D, %d)\n", rounds);
+    ds.appendf("@result = @repeat(\xce\xbb&m. @mat_mul(m, m), @D_init, %d)\n", rounds);
+
+    // --- Extract results as flat list ---
+    // Direct extraction: @tg(depth, j, @tg(depth, i, mat))
+    ds.append_string("@main = [");
+    for (uint i = 0; i < n; i++) {
+        for (uint j = 0; j < n; j++) {
+            if (i > 0 || j > 0) ds.append_string(", ");
+            ds.appendf("@tg(@TD, %d, @tg(@TD, %d, @result))", j, i);
+        }
+    }
+    ds.append_string("]\n");
 
     // --- Run HVM4 ---
     usz total = (usz)n * n;
@@ -655,215 +635,199 @@ fn PathResult? enumerate_paths(Graph* g, uint source, uint sink) {
 }
 
 // ============================================================
-// Helper: emit radix-4 trie definitions for hybrid BF
+// 7. DAG-DP (shortest path via nested let-bindings)
+//    Graph structure embedded directly in HVM4 let-binding chain.
+//    Each node becomes a `! &eXXX = ...` binding; @min reduces edges.
+//    O(E) work, O(V+E) heap. No trie needed.
+//    Requires DAG input: edges must go from lower to higher node index.
 // ============================================================
 
-fn void emit_q4_trie_defs(DStr* ds) {
-    // q4_get_lin: linear get that returns #P{val, rebuilt_trie}
-    ds.append_string("@q4_get_lin = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{");
-    ds.append_string("#QE: #P{@INF, #QE{}}; ");
-    ds.append_string("#QL: \xce\xbb&val. #P{val, #QL{val}}; ");
-    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_get_lin_Q(slot, next, nd, c0, c1, c2, c3)}\n");
+// B64 alphabet for collision-free 4-char variable names (HVM4 nick encoding)
+const ZString B64 = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$";
 
-    ds.append_string("@q4_get_lin_Q = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c0. #P{val, #Q{new_c0, c1, c2, c3}}}(@q4_get_lin(next, nd, c0)); ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c1. #P{val, #Q{c0, new_c1, c2, c3}}}(@q4_get_lin(next, nd, c1)); ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c2. #P{val, #Q{c0, c1, new_c2, c3}}}(@q4_get_lin(next, nd, c2)); ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbval. \xce\xbbnew_c3. #P{val, #Q{c0, c1, c2, new_c3}}}(@q4_get_lin(next, nd, c3))}\n");
-
-    // q4_get: simple get returning just the value
-    ds.append_string("@q4_get = \xce\xbb&key. \xce\xbb&depth. \xce\xbb{");
-    ds.append_string("#QE: @INF; #QL: \xce\xbbval. val; ");
-    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_get_Q(slot, next, nd, c0, c1, c2, c3)}\n");
-
-    ds.append_string("@q4_get_Q = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c0); ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c1); ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c2); ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. @q4_get(next, nd, c3)}\n");
-
-    // q4_set: insert/update
-    ds.append_string("@q4_set = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{");
-    ds.append_string("#QL: \xce\xbbold. #QL{val}; ");
-    ds.append_string("#QE: \xce\xbb{0: #QL{val}; \xce\xbbn. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_set_QE(slot, next, val, nd)}(depth); ");
-    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_set_Q(slot, next, val, nd, c0, c1, c2, c3)}\n");
-
-    ds.append_string("@q4_set_QE = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{@q4_set(next, val, nd, #QE{}), #QE{}, #QE{}, #QE{}}; ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, @q4_set(next, val, nd, #QE{}), #QE{}, #QE{}}; ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, #QE{}, @q4_set(next, val, nd, #QE{}), #QE{}}; ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. #Q{#QE{}, #QE{}, #QE{}, @q4_set(next, val, nd, #QE{})}}\n");
-
-    ds.append_string("@q4_set_Q = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{@q4_set(next, val, nd, c0), c1, c2, c3}; ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, @q4_set(next, val, nd, c1), c2, c3}; ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, c1, @q4_set(next, val, nd, c2), c3}; ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. #Q{c0, c1, c2, @q4_set(next, val, nd, c3)}}\n");
-
-    // q4_min_update_f: conditional min-update returning #P{new_trie, changed_flag}
-    ds.append_string("@q4_min_update_f = \xce\xbb&key. \xce\xbb&val. \xce\xbb&depth. \xce\xbb{");
-    ds.append_string("#QL: \xce\xbb&old. \xce\xbb{0: #P{#QL{old}, 0}; \xce\xbbn. #P{#QL{val}, 1}}(val < old); ");
-    ds.append_string("#QE: \xce\xbb{0: #P{#QL{val}, 1}; \xce\xbbn. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_muf_QE(slot, next, val, nd)}(depth); ");
-    ds.append_string("#Q: \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("! slot = key % 4; ! next = key / 4; ! nd = depth - 1; ");
-    ds.append_string("@q4_muf_Q(slot, next, val, nd, c0, c1, c2, c3)}\n");
-
-    ds.append_string("@q4_muf_QE = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{child, #QE{}, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, child, #QE{}, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, #QE{}, child, #QE{}}, c}}(@q4_min_update_f(next, val, nd, #QE{})); ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbb{#P: \xce\xbbchild. \xce\xbbc. #P{#Q{#QE{}, #QE{}, #QE{}, child}, c}}(@q4_min_update_f(next, val, nd, #QE{}))}\n");
-
-    ds.append_string("@q4_muf_Q = \xce\xbb{");
-    ds.append_string("0: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c0. \xce\xbbc. #P{#Q{new_c0, c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c0)); ");
-    ds.append_string("1: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c1. \xce\xbbc. #P{#Q{c0, new_c1, c2, c3}, c}}(@q4_min_update_f(next, val, nd, c1)); ");
-    ds.append_string("2: \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c2. \xce\xbbc. #P{#Q{c0, c1, new_c2, c3}, c}}(@q4_min_update_f(next, val, nd, c2)); ");
-    ds.append_string("\xce\xbbn. \xce\xbbnext. \xce\xbbval. \xce\xbbnd. \xce\xbbc0. \xce\xbbc1. \xce\xbbc2. \xce\xbbc3. ");
-    ds.append_string("\xce\xbb{#P: \xce\xbbnew_c3. \xce\xbbc. #P{#Q{c0, c1, c2, new_c3}, c}}(@q4_min_update_f(next, val, nd, c3))}\n");
+fn void append_node_name(DStr* ds, uint n) {
+    ds.append_char('e');
+    ds.append_char(B64[(n >> 12) & 63]);
+    ds.append_char(B64[(n >> 6) & 63]);
+    ds.append_char(B64[n & 63]);
 }
 
-// ============================================================
-// 7. Hybrid Bellman-Ford (FFI graph access)
-//    Graph stored in C memory as CSR. HVM4 only has the
-//    radix-4 distance trie. FFI primitives read graph data.
-// ============================================================
+fn uint? dag_dp(Graph* g, uint source, uint sink) {
+    if (source >= g.n || sink >= g.n) return INVALID_NODE~;
 
-const String HYBRID_BF_RELAX = `
-@relax_edges = λ&u. λ&i. λ&deg. λ&du. λ{
-  #S: λ&dist. λ&changed.
-    λ{0: #S{dist, changed};
-    λn.
-      ! &v = %graph_target(u, i);
-      ! new_d = du + %graph_weight(u, i);
-      λ{#P: λnew_dist. λc.
-        @relax_edges(u, i + 1, deg, du, #S{new_dist, changed + c})
-      }(@q4_min_update_f(v, new_d, @DEPTH, dist))
-    }(i < deg)
-}
-
-@relax_node_et = λ&u. λ{
-  #S: λdist. λ&changed.
-    λ{#P: λ&du. λdist2.
-      @relax_node_go(du < @INF, u, du, dist2, changed)
-    }(@q4_get_lin(u, @DEPTH, dist))
-}
-
-@relax_node_go = λ{
-  0: λu. λdu. λdist. λchanged. #S{dist, changed};
-  λn. λ&u. λ&du. λdist. λchanged.
-    @relax_edges(u, 0, %graph_deg(u), du, #S{dist, changed})
-}
-
-@node_loop = λ&i. λ&state.
-  λ{0: state;
-  λn. @node_loop(i + 1, @relax_node_et(i, state))
-  }(i < @V)
-
-@relax_round_et = λ{
-  #S: λdist. λold_changed.
-    @node_loop(0, #S{dist, 0})
-}
-
-@bf_loop = λ{
-  0: λstate. state;
-  λn. λstate. @bf_check(n, @relax_round_et(state))
-}
-@bf_check = λ&n. λ{
-  #S: λdist. λchanged. @bf_check_go(changed, n, dist)
-}
-@bf_check_go = λ{
-  0: λn. λdist. #S{dist, 0};
-  λm. λn. λdist. @bf_loop(n - 1, %compact(#S{dist, 1}))
-}
-`;
-
-const String HYBRID_BF_EXTRACT = `
-@extract_go = λ&i. λ{
-  #P: λ&val. λdist.
-    λ{0: [val];
-    λn. val <> @extract_go(i + 1, @q4_get_lin(i + 1, @DEPTH, dist))
-    }(i + 1 < @V)
-}
-
-@main = λ{#S: λdist. λc.
-  λ{0: [];
-  λn. @extract_go(0, @q4_get_lin(0, @DEPTH, dist))
-  }(@V)
-}(@bf)
-`;
-
-fn uint[]? bellman_ford_hybrid(Graph* g, uint source) {
     uint n = g.n;
-    if (source >= n) return INVALID_NODE~;
 
-    // Build CSR from adjacency list
-    uint total_e = 0;
-    for (uint u = 0; u < n; u++) total_e += (uint)g.adj[u].len();
-
-    uint[] row_ptr = mem::new_array(uint, (usz)(n + 1));
-    usz alloc_e = total_e > 0 ? (usz)total_e : 1;
-    uint[] col_idx = mem::new_array(uint, alloc_e);
-    uint[] weight  = mem::new_array(uint, alloc_e);
-    defer { free(row_ptr.ptr); free(col_idx.ptr); free(weight.ptr); }
-
-    uint offset = 0;
-    for (uint u = 0; u < n; u++) {
-        row_ptr[u] = offset;
-        for (usz j = 0; j < g.adj[u].len(); j++) {
-            Edge e = g.adj[u][j];
-            col_idx[offset] = e.to;
-            weight[offset]  = e.weight;
-            offset++;
-        }
-    }
-    row_ptr[n] = offset;
-
-    // Setup: reset → register graph prims → generate source → run
     hvm4_lib_reset();
-    hvm4_graph_setup(row_ptr.ptr, col_idx.ptr, weight.ptr, n);
 
     DStr ds = new_dstr();
     defer ds.free();
-    uint depth = ceil_log4(n);
-    uint rounds = n > 1 ? n - 1 : 1;
+
+    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
+    ds.append_string("@INF = 999999\n");
+    ds.append_string("@main =\n");
+
+    // Destination binding: dist = 0
+    ds.append_string("  ! &");
+    append_node_name(&ds, sink);
+    ds.append_string(" = 0;\n");
+
+    // Non-source, non-sink nodes in reverse topological order
+    for (int u = (int)n - 2; u >= 0; u--) {
+        if ((uint)u == source) continue;
+        if ((uint)u == sink) continue;
+
+        usz deg = g.adj[(uint)u].len();
+        if (deg == 0) {
+            ds.append_string("  ! &");
+            append_node_name(&ds, (uint)u);
+            ds.append_string(" = @INF;\n");
+        } else if (deg == 1) {
+            Edge e = g.adj[(uint)u][0];
+            ds.append_string("  ! &");
+            append_node_name(&ds, (uint)u);
+            ds.appendf(" = %d + ", e.weight);
+            append_node_name(&ds, e.to);
+            ds.append_string(";\n");
+        } else {
+            // Multiple edges: @min(w1 + t1, @min(w2 + t2, ... wk + tk))
+            ds.append_string("  ! &");
+            append_node_name(&ds, (uint)u);
+            ds.append_string(" = ");
+            for (usz i = 0; i < deg - 1; i++) {
+                Edge e = g.adj[(uint)u][i];
+                ds.appendf("@min(%d + ", e.weight);
+                append_node_name(&ds, e.to);
+                ds.append_string(", ");
+            }
+            Edge elast = g.adj[(uint)u][deg - 1];
+            ds.appendf("%d + ", elast.weight);
+            append_node_name(&ds, elast.to);
+            for (usz i = 0; i < deg - 1; i++) ds.append_string(")");
+            ds.append_string(";\n");
+        }
+    }
+
+    // Source node: return expression (not bound)
+    usz src_deg = g.adj[source].len();
+    if (src_deg == 0) {
+        ds.append_string("  @INF\n");
+    } else if (src_deg == 1) {
+        Edge e = g.adj[source][0];
+        ds.appendf("  %d + ", e.weight);
+        append_node_name(&ds, e.to);
+        ds.append_string("\n");
+    } else {
+        ds.append_string("  ");
+        for (usz i = 0; i < src_deg - 1; i++) {
+            Edge e = g.adj[source][i];
+            ds.appendf("@min(%d + ", e.weight);
+            append_node_name(&ds, e.to);
+            ds.append_string(", ");
+        }
+        Edge elast = g.adj[source][src_deg - 1];
+        ds.appendf("%d + ", elast.weight);
+        append_node_name(&ds, elast.to);
+        for (usz i = 0; i < src_deg - 1; i++) ds.append_string(")");
+        ds.append_string("\n");
+    }
+
+    // Run HVM4 (no collapse needed — single numeric result)
+    uint result;
+    int count = hvm4_run(ds.zstr_view(), 0, &result, 1);
+
+    if (count < 0) return HVM_ERROR~;
+    if (result >= INF) return NO_PATH~;
+
+    return result;
+}
+
+// ============================================================
+// 8. Connected Components (Label Propagation)
+//    Tree-parallel: each round, every node takes min of its
+//    own label and all neighbors' labels. O(log V) rounds.
+//    Graph should have edges in both directions for undirected CC.
+//    Returns uint[] of N labels (label = min node index in component).
+// ============================================================
+
+fn uint[]? connected_components(Graph* g) {
+    uint n = g.n;
+    if (n == 0) return INVALID_NODE~;
+
+    hvm4_lib_reset();
+
+    DStr ds = new_dstr();
+    defer ds.free();
+
+    uint depth = ceil_log2(n);
+    uint rounds = depth;  // O(log V) rounds sufficient for convergence
 
     // Constants
     ds.append_string("@INF = 999999\n");
-    ds.appendf("@DEPTH = %d\n@V = %d\n", depth, n);
+    ds.appendf("@TD = %d\n", depth);
+    ds.appendf("@N = %d\n", n);
 
-    // Radix-4 trie definitions
-    emit_q4_trie_defs(&ds);
+    // Min helper
+    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
 
-    // Relaxation via FFI
-    ds.append_string(HYBRID_BF_RELAX);
+    // Tree operations
+    emit_tree_ops(&ds);
 
-    // Initial state + run
-    ds.appendf("@init_dist = @q4_set(%d, 0, @DEPTH, #QE{})\n", source);
-    ds.appendf("@bf = @bf_loop(%d, #S{@init_dist, 1})\n", rounds);
+    // Per-node update: @upd(node_idx, labels) = min(self_label, neighbor_labels...)
+    ds.append_string("@upd = \xce\xbb{");
+    for (uint i = 0; i < n; i++) {
+        usz deg = g.adj[i].len();
+        ds.appendf("%d: \xce\xbb&labels. ", i);
 
-    // Extract loop
-    ds.append_string(HYBRID_BF_EXTRACT);
+        if (deg == 0) {
+            // Isolated node: keep own label
+            ds.appendf("@tg(@TD, %d, labels)", i);
+        } else {
+            // @min(self, @min(n0, @min(n1, ... nk)))
+            ds.append_string("@min(");
+            ds.appendf("@tg(@TD, %d, labels), ", i);
+            for (usz k = 0; k + 1 < deg; k++) {
+                Edge e = g.adj[i][k];
+                ds.append_string("@min(");
+                ds.appendf("@tg(@TD, %d, labels), ", e.to);
+            }
+            Edge elast = g.adj[i][deg - 1];
+            ds.appendf("@tg(@TD, %d, labels)", elast.to);
+            for (usz k = 0; k < deg; k++) ds.append_string(")");
+        }
+
+        ds.append_string("; ");
+    }
+    ds.append_string("\xce\xbbn. \xce\xbblabels. n}\n");
+
+    // One round of label propagation
+    ds.append_string("@round = \xce\xbb&labels. @bld(@TD, 0, 1, @N, \xce\xbb&i. @upd(i, labels))\n");
+
+    // Repeated rounds
+    ds.append_string("@repeat = \xce\xbb{0: \xce\xbbf. \xce\xbbx. x; \xce\xbbn. ! &d = n; \xce\xbb&f. \xce\xbbx. @repeat(d - 1, f, f(x))}\n");
+
+    // Initial labels: each node = its own index
+    ds.append_string("@init = @bld(@TD, 0, 1, @N, \xce\xbbi. i)\n");
+
+    // Run label propagation
+    ds.appendf("@res = @repeat(%d, @round, @init)\n", rounds);
+
+    // Extract results as flat list
+    ds.append_string("@main = [");
+    for (uint i = 0; i < n; i++) {
+        if (i > 0) ds.append_string(", ");
+        ds.appendf("@tg(@TD, %d, @res)", i);
+    }
+    ds.append_string("]\n");
 
     // Run HVM4
-    uint[] out_buf = mem::new_array(uint, (usz)n);
+    uint[] out_buf = mem::new_array(uint, n);
     int count = hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)n);
-    if (count < 0) { free(out_buf.ptr); return HVM_ERROR~; }
+
+    if (count < 0) {
+        free(out_buf.ptr);
+        return HVM_ERROR~;
+    }
+
     return out_buf;
 }
+

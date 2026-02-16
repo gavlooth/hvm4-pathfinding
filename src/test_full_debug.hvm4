@@ -1,0 +1,79 @@
+// Minimal delta-stepping debug
+
+@INF = 999
+@DELTA = 5
+
+@Edge = λsrc. λdst. λweight. λf. f(src)(dst)(weight)
+@get_src = λedge. edge(λsrc. λdst. λw. src)
+@get_dst = λedge. edge(λsrc. λdst. λw. dst)
+@get_weight = λedge. edge(λsrc. λdst. λw. w)
+
+@dist_lookup = λ&node. λ{
+  []: @INF;
+  <>: λpair. λ&rest.
+    λ{
+      []: @dist_lookup(node)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          []: @dist_lookup(node)(rest);
+          <>: λ&d. λtmp.
+            λ{0: @dist_lookup(node)(rest); λk. d}(n == node)
+        }(tail)
+    }(pair)
+}
+
+@dist_update = λ&node. λ&new_dist. λ{
+  []: [node, new_dist] <> [];
+  <>: λ&pair. λ&rest.
+    λ{
+      []: pair <> @dist_update(node)(new_dist)(rest);
+      <>: λ&n. λ&tail.
+        λ{
+          0: pair <> @dist_update(node)(new_dist)(rest);
+          λk. [node, new_dist] <> rest
+        }(n == node)
+    }(pair)
+}
+
+@out_edges_acc = λ&node. λ&acc. λ{
+  []: acc;
+  <>: λ&edge. λ&rest.
+    ! &src = @get_src(edge);
+    λ{
+      0: @out_edges_acc(node)(acc)(rest);
+      λk. @out_edges_acc(node)(edge <> acc)(rest)
+    }(src == node)
+}
+
+@out_edges = λnode. λedges. @out_edges_acc(node)([])(edges)
+
+@min = λ&a. λ&b. λ{0: b; λk. a}(a < b)
+
+@bucket_idx = λdist. λdelta. dist / delta
+
+@bucket_get_idx = λbucket. λ{[]: 0; <>: λidx. λtail. idx}(bucket)
+@bucket_get_nodes = λbucket. λ{[]: []; <>: λidx. λtail. λ{[]: []; <>: λnodes. λr. nodes}(tail)}(bucket)
+
+@bucket_insert = λ&node. λ&dist. λ&delta. λ{
+  []: [@bucket_idx(dist)(delta), node <> []] <> [];
+  <>: λ&bucket. λ&rest.
+    ! &idx = @bucket_get_idx(bucket);
+    ! &target_idx = @bucket_idx(dist)(delta);
+    λ{
+      0: bucket <> @bucket_insert(node)(dist)(delta)(rest);
+      λk.
+        ! &nodes = @bucket_get_nodes(bucket);
+        [idx, node <> nodes] <> rest
+    }(idx == target_idx)
+}
+
+@test_edges = @Edge(0)(1)(2) <> []
+
+// Test: Check basic operations
+@main =
+  ! &init_dist = [0, 0] <> [];
+  ! &edges_from_0 = @out_edges(0)(@test_edges);
+  ! &dist_0 = @dist_lookup(0)(init_dist);
+  ! &dist_1 = @dist_lookup(1)(init_dist);
+  ! &updated = @dist_update(1)(2)(init_dist);
+  [edges_from_0, dist_0, dist_1, updated]

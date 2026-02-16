@@ -16,8 +16,9 @@ enum ScenarioStrategy : char {
     BEST_SINGLE
 }
 
-// Run Bellman-Ford once with superposed edge weights for N weather scenarios.
+// Run APSP once with superposed edge weights for N weather scenarios.
 // Returns N costs (one per scenario) via HVM4 collapse.
+// Uses tree-parallel matrix squaring under tropical (min, +) semiring.
 fn uint[]? swr_replan_multi(
     swr::SwrState* state,
     swr::WeatherGrid[] scenarios,
@@ -42,7 +43,7 @@ fn uint[]? swr_replan_multi(
         for (uint i = 0; i < edge_count; i++) {
             uint from = state.prm.edge_from[i];
             uint to = state.prm.edge_to[i];
-            swr::LatLon mid = {
+            pathfind::LatLon mid = {
                 .lat = (state.prm.waypoints[from].pos.lat + state.prm.waypoints[to].pos.lat) / 2.0,
                 .lon = (state.prm.waypoints[from].pos.lon + state.prm.waypoints[to].pos.lon) / 2.0
             };
@@ -52,52 +53,84 @@ fn uint[]? swr_replan_multi(
                 state.prm.edge_heading[i], &state.cost_cfg);
             uint weight = (uint)(cost * (double)state.cost_cfg.scale);
             if (weight < 1) weight = 1;
-            if (weight > 900_000) weight = 900_000;
+            if (weight > swr::MAX_EDGE_WEIGHT) weight = swr::MAX_EDGE_WEIGHT;
             scenario_weights[s][i] = weight;
         }
     }
 
-    // Generate HVM4 source with superposed edge weights
+    // Generate HVM4 source with tree-parallel APSP + SUP weights
     pathfind::hvm4_lib_reset();
 
     DStr ds = dstring::new(mem);
     defer ds.free();
 
-    uint depth = pathfind::ceil_log16(n);
+    uint depth = pathfind::ceil_log2(n);
 
     // Constants
     ds.append_string("@INF = 999999\n");
-    ds.appendf("@DEPTH = %d\n", depth);
+    ds.appendf("@TD = %d\n", depth);
+    ds.appendf("@N = %d\n", n);
 
-    // Trie definitions
-    pathfind::emit_trie_defs(&ds);
+    // Tropical operations
+    ds.append_string("@trop_add = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
+    ds.append_string("@trop_mul = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: \xce\xbb{0: a + b; \xce\xbbn. @INF}(b == @INF); \xce\xbbn. @INF}(a == @INF)\n");
 
-    // Helpers (same as bellman_ford)
-    ds.append_string("@min = \xce\xbb&a. \xce\xbb&b. \xce\xbb{0: b; \xce\xbbn. a}(a < b)\n");
-    ds.append_string("@relax_edge = \xce\xbb&dist. \xce\xbb{#E3: \xce\xbb&u. \xce\xbb&v. \xce\xbbw. ! &du = @trie_get(u, @DEPTH, dist); ! &new_d = du + w; ! &dv = @trie_get(v, @DEPTH, dist); \xce\xbb{0: dist; \xce\xbbn. @trie_set(v, new_d, @DEPTH, dist)}(new_d < dv)}\n");
-    ds.append_string("@foldl = \xce\xbb&f. \xce\xbb&acc. \xce\xbb{[]: acc; <>: \xce\xbbh. \xce\xbbt. @foldl(f, f(acc, h), t)}\n");
-    ds.append_string("@relax_round = \xce\xbbdist. @foldl(@relax_edge, dist, @edges)\n");
-    ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
+    // Tree operations (Bend-style parallel)
+    pathfind::emit_tree_ops(&ds);
 
-    // Edge list with superposed weights
-    ds.append_string("@edges = [");
-    for (uint i = 0; i < edge_count; i++) {
-        if (i > 0) ds.append_string(", ");
-        ds.appendf("#E3{%d,%d,", state.prm.edge_from[i], state.prm.edge_to[i]);
-        emit_sup_weight(&ds, scenario_weights, i, n_scenarios);
-        ds.append_string("}");
+    // Dot product, column extraction, row builder, mat_mul
+    ds.append_string("@dot = \xce\xbb&row. \xce\xbb&cv. @tf(@TD, \xce\xbba. \xce\xbbb. @trop_add(a, b), @tz(@TD, \xce\xbba. \xce\xbbb. @trop_mul(a, b), row, cv))\n");
+    ds.append_string("@col = \xce\xbb&j. \xce\xbb&mat. @tm(@TD, \xce\xbbrow. @tg(@TD, j, row), mat)\n");
+    ds.append_string("@brr = \xce\xbb{0: \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&row. \xce\xbb&B. \xce\xbb{0: @INF; \xce\xbbm. @dot(row, @col(i, B))}(i < lim); \xce\xbbn. ! &d = n; \xce\xbb&i. \xce\xbb&s. \xce\xbb&lim. \xce\xbb&row. \xce\xbb&B. ! &ns = s * 2; #P{@brr(d - 1, i, ns, lim, row, B), @brr(d - 1, i + s, ns, lim, row, B)}}\n");
+    ds.append_string("@mat_mul = \xce\xbb&A. \xce\xbb&B. @tm(@TD, \xce\xbb&row. @brr(@TD, 0, 1, @N, row, B), A)\n");
+
+    // Build adjacency matrix with SUP-labeled weights
+    // Precompute: for each (i,j), find the edge index (or -1)
+    int* edge_idx = (int*)mem::calloc((usz)n * n * int.sizeof);
+    defer free(edge_idx);
+    for (uint i = 0; i < n * n; i++) edge_idx[i] = -1;
+    for (uint e = 0; e < edge_count; e++) {
+        uint u = state.prm.edge_from[e];
+        uint v = state.prm.edge_to[e];
+        edge_idx[u * n + v] = (int)e;
     }
-    ds.append_string("]\n");
 
-    // Initial distance
-    ds.appendf("@init_dist = @trie_set(%d, 0, @DEPTH, #HE{})\n", state.origin);
+    // Emit row value lookup with SUP weights
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("@rv_%d = \xce\xbb{", i);
+        for (uint j = 0; j < n; j++) {
+            ds.appendf("%d: ", j);
+            if (i == j) {
+                ds.append_string("0");
+            } else if (edge_idx[i * n + j] >= 0) {
+                emit_sup_weight(&ds, scenario_weights, (uint)edge_idx[i * n + j], n_scenarios);
+            } else {
+                ds.append_string("@INF");
+            }
+            ds.append_string("; ");
+        }
+        ds.append_string("\xce\xbbn. @INF}\n");
+    }
 
-    // Run V-1 rounds
-    uint rounds = n > 1 ? n - 1 : 1;
-    ds.appendf("@bf = @repeat(@relax_round, @init_dist, %d)\n", rounds);
+    // Row builders and matrix
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("@row_%d = @bld(@TD, 0, 1, @N, @rv_%d)\n", i, i);
+    }
+    ds.append_string("@mrv = \xce\xbb{");
+    for (uint i = 0; i < n; i++) {
+        ds.appendf("%d: @row_%d; ", i, i);
+    }
+    ds.append_string("\xce\xbbn. @bld_inf(@TD)}\n");
+    ds.append_string("@D_init = @bld(@TD, 0, 1, @N, @mrv)\n");
 
-    // Extract destination distance (superposed result)
-    ds.appendf("@main = @trie_get(%d, @DEPTH, @bf)\n", state.destination);
+    // Repeated squaring
+    uint rounds = pathfind::ceil_log2(n);
+    ds.append_string("@repeat = \xce\xbb&f. \xce\xbb&x. \xce\xbb{0: x; \xce\xbbn. @repeat(f, f(x), n - 1)}\n");
+    ds.appendf("@result = @repeat(\xce\xbb&m. @mat_mul(m, m), @D_init, %d)\n", rounds);
+
+    // Extract result[origin][destination] — a superposed value
+    ds.appendf("@main = @tg(@TD, %d, @tg(@TD, %d, @result))\n",
+        state.destination, state.origin);
 
     // Run HVM4 with collapse to get N scenario results
     uint max_out = n_scenarios * 2;

@@ -6,7 +6,7 @@ CFLAGS = -O3 -Wall -Wextra -std=c11 -march=x86-64 -mtune=generic -pthread -D_GNU
 LDFLAGS = -lm -pthread
 
 # Source files
-LIB_SRC = libhvm4_graph.c
+LIB_SRC = libhvm4_graph_ffi.c
 LIB_HEADER = libhvm4_graph.h
 LIB_OBJ = libhvm4_graph.o
 LIB_STATIC = libhvm4_graph.a

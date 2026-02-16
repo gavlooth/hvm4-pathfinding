@@ -1,0 +1,330 @@
+// Maritime Route Optimization - Edge Evolution Module
+// Time-dependent edge weights with discrete 6-hour weather lookups
+//
+// Architecture:
+// - Discrete time steps (0h, 6h, 12h, ..., 48h)
+// - Tree-structured weather data (lat × lon × time)
+// - DUP memoization for repeated lookups
+// - Speed loss formula based on wave height and direction
+
+// ---- Constants ----
+
+@INF = 999999
+@PI = 3.14159
+@V_DESIGN = 15.0  // Ship design speed (knots)
+
+// ---- Weather Entry ----
+// {hs tp wave_dir wind_spd wind_dir}
+
+@Weather = λhs. λtp. λwave_dir. λwind_spd. λwind_dir. λf. 
+  f(hs)(tp)(wave_dir)(wind_spd)(wind_dir)
+
+@w_get_hs = λw. w(λh. λt. λwd. λws. λwdir. h)
+@w_get_tp = λw. w(λh. λt. λwd. λws. λwdir. t)
+@w_get_wave_dir = λw. w(λh. λt. λwd. λws. λwdir. wd)
+@w_get_wind_spd = λw. w(λh. λt. λwd. λws. λwdir. ws)
+@w_get_wind_dir = λw. w(λh. λt. λwd. λws. λwdir. wdir)
+
+// Default weather (calm conditions)
+@default_weather = @Weather(1.0)(8.0)(0.0)(5.0)(0.0)
+
+// ---- Edge Entry ----
+// {from_id to_id distance from_lat from_lon to_lat to_lon}
+
+@Edge = λfrom_id. λto_id. λdistance. λfrom_lat. λfrom_lon. λto_lat. λto_lon. λf.
+  f(from_id)(to_id)(distance)(from_lat)(from_lon)(to_lat)(to_lon)
+
+@e_get_from = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. fid)
+@e_get_to = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. tid)
+@e_get_dist = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. d)
+@e_get_from_lat = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. flat)
+@e_get_from_lon = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. flon)
+@e_get_to_lat = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. tlat)
+@e_get_to_lon = λe. e(λfid. λtid. λd. λflat. λflon. λtlat. λtlon. tlon)
+
+// ---- Math Helpers ----
+
+@abs = λ&x. λ{0: x; λn. 0 - x}(x < 0)
+
+@min_val = λ&a. λ&b. λ{0: b; λn. a}(a < b)
+
+@max_val = λ&a. λ&b. λ{0: a; λn. b}(a < b)
+
+// Simplified cos approximation (for demo purposes)
+// cos(x) ≈ 1 - x²/2 for small x
+@cos_approx = λ&angle.
+  ! &norm = angle % 360;
+  ! &rad = norm * @PI / 180;
+  ! &sq = rad * rad;
+  1.0 - (sq / 2.0)
+
+// Simplified atan2 (returns degrees 0-360)
+// Placeholder: returns 45° for all cases (simplified for toy test)
+@atan2_simple = λdy. λdx. 45.0
+
+// ---- Weather Tree Lookup ----
+// Tree structure: nested tuples indexed by (lat_idx, lon_idx, time_idx)
+// Pattern: {idx_key val_subtree rest} or []
+
+@lookup_lat = λ&lat_idx. λ{
+  []: @default_weather;
+  <>: λ&entry. λ&rest_tree.
+    λ{
+      []: @lookup_lat(lat_idx)(rest_tree);
+      <>: λ&key. λ&tail.
+        λ{
+          []: @lookup_lat(lat_idx)(rest_tree);
+          <>: λ&lon_tree. λtmp.
+            λ{0: lon_tree; λk. @lookup_lat(lat_idx)(rest_tree)}(key == lat_idx)
+        }(tail)
+    }(entry)
+}
+
+@lookup_lon = λ&lon_idx. λ{
+  []: @default_weather;
+  <>: λ&entry. λ&rest_tree.
+    λ{
+      []: @lookup_lon(lon_idx)(rest_tree);
+      <>: λ&key. λ&tail.
+        λ{
+          []: @lookup_lon(lon_idx)(rest_tree);
+          <>: λ&time_tree. λtmp.
+            λ{0: time_tree; λk. @lookup_lon(lon_idx)(rest_tree)}(key == lon_idx)
+        }(tail)
+    }(entry)
+}
+
+@lookup_time = λ&time_idx. λ{
+  []: @default_weather;
+  <>: λ&entry. λ&rest_tree.
+    λ{
+      []: @lookup_time(time_idx)(rest_tree);
+      <>: λ&key. λ&tail.
+        λ{
+          []: @lookup_time(time_idx)(rest_tree);
+          <>: λ&weather. λtmp.
+            λ{0: weather; λk. @lookup_time(time_idx)(rest_tree)}(key == time_idx)
+        }(tail)
+    }(entry)
+}
+
+// Top-level 3D lookup with DUP memoization
+@lookup_3d = λlat_idx. λlon_idx. λtime_idx. λ&weather_tree.
+  ! &lat_tree = @lookup_lat(lat_idx)(weather_tree);
+  ! &lon_tree = @lookup_lon(lon_idx)(lat_tree);
+  @lookup_time(time_idx)(lon_tree)
+
+// ---- Edge Weight Calculation ----
+
+// Discretize coordinates to grid indices (toy: 0-2 for 3×3 grid)
+@discretize_coord = λcoord. coord  // Direct mapping for toy test
+
+// Snap time to 6-hour bucket
+@snap_time_bucket = λtime_hour. (time_hour / 6) * 6
+
+// Calculate edge weight at specific time
+@edge_weight_at_time = λ&time_hour. λ&edge. λ&weather_tree.
+  ! &from_lat = @e_get_from_lat(edge);
+  ! &from_lon = @e_get_from_lon(edge);
+  ! &to_lat = @e_get_to_lat(edge);
+  ! &to_lon = @e_get_to_lon(edge);
+  ! &dist = @e_get_dist(edge);
+  
+  // Snap to 6-hour bucket
+  ! &bucket = @snap_time_bucket(time_hour);
+  
+  // Calculate edge midpoint
+  ! &mid_lat = (from_lat + to_lat) / 2;
+  ! &mid_lon = (from_lon + to_lon) / 2;
+  
+  // Discretize to grid indices
+  ! &lat_idx = @discretize_coord(mid_lat);
+  ! &lon_idx = @discretize_coord(mid_lon);
+  
+  // Lookup weather at midpoint
+  ! &weather = @lookup_3d(lat_idx, lon_idx, bucket, weather_tree);
+  
+  // Extract weather parameters
+  ! &hs = @w_get_hs(weather);
+  ! &wave_dir = @w_get_wave_dir(weather);
+  
+  // Calculate ship heading (simplified)
+  ! &dy = to_lat - from_lat;
+  ! &dx = to_lon - from_lon;
+  ! &heading = @atan2_simple(dy)(dx);
+  
+  // Relative wave angle
+  ! &beta = @abs(heading - wave_dir);
+  
+  // Speed loss formula: speed_loss = hs × 0.3 × cos(β)
+  ! &cos_beta = @cos_approx(beta);
+  ! &speed_loss = hs * 0.3 * cos_beta;
+  
+  // Real speed (clamped to positive)
+  ! &v_real = @max_val(@V_DESIGN - speed_loss)(0.1);
+  
+  // Time cost in hours
+  dist / v_real
+
+// ---- Tree Mapping Helpers ----
+
+@map_tree = λf. λ{
+  []: [];
+  <>: λ&val. λ&rest.
+    ! &new_val = f(val);
+    ! &new_rest = @map_tree(f)(rest);
+    new_val <> new_rest
+}
+
+// Build time list: [start, start+step, ..., end]
+@build_time_list_helper = λcurrent. λend. λstep. λ{
+  0: current <> @build_time_list_helper(current + step)(end)(step);
+  λk. []
+}(current <= end)
+
+@build_time_list = λstart. λend. λstep.
+  @build_time_list_helper(start)(end)(step)
+
+// ---- Main Evolution Function ----
+
+// Evolve edges: compute weights at all time steps
+@evolve_edges = λ&edges. λ&weather_tree.
+  // Time steps for toy test: 0, 6, 12
+  ! &time_steps = 0 <> 6 <> 12 <> [];
+  
+  @map_tree(λ&time_val.
+    ! &edge_weights = @map_tree(λ&edge.
+      @edge_weight_at_time(time_val, edge, weather_tree)
+    )(edges);
+    [time_val, edge_weights] <> []
+  )(time_steps)
+
+// ---- Toy Test Data (3×3 grid, 3 time steps) ----
+
+// Weather tree structure:
+// lat_idx <> [lon_idx <> [time_idx <> weather] ] <> rest
+//
+// Simplified flat encoding for toy test:
+// t=0h:  Hs = [[2.0, 2.5, 3.0],
+//              [2.5, 3.0, 3.5],
+//              [3.0, 3.5, 4.0]]
+//
+// t=6h:  Hs = [[2.5, 3.0, 3.5],
+//              [3.0, 3.5, 4.0],
+//              [3.5, 4.0, 4.5]]
+//
+// t=12h: Hs = [[2.0, 2.5, 3.0],
+//              [2.5, 3.0, 3.5],
+//              [3.0, 3.5, 4.0]]
+
+@test_weather_tree =
+  // lat_idx=0
+  [0, [
+    // lon_idx=0
+    [0, [
+      [0, @Weather(2.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(2.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(2.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=1
+    [1, [
+      [0, @Weather(2.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(2.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=2
+    [2, [
+      [0, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    []
+  ] <> 
+  // lat_idx=1
+  [1, [
+    // lon_idx=0
+    [0, [
+      [0, @Weather(2.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(2.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=1
+    [1, [
+      [0, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=2
+    [2, [
+      [0, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(4.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    []
+  ] <> 
+  // lat_idx=2
+  [2, [
+    // lon_idx=0
+    [0, [
+      [0, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(3.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=1
+    [1, [
+      [0, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(4.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(3.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    // lon_idx=2
+    [2, [
+      [0, @Weather(4.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      [6, @Weather(4.5)(8.0)(90.0)(5.0)(0.0)] <> 
+      [12, @Weather(4.0)(8.0)(90.0)(5.0)(0.0)] <> 
+      []
+    ] <> 
+    []
+  ] <> 
+  []
+] <> []
+
+// Test edges: 3×3 grid horizontal and vertical connections
+// Grid layout:
+// (0,0)-(0,1)-(0,2)
+//   |     |     |
+// (1,0)-(1,1)-(1,2)
+//   |     |     |
+// (2,0)-(2,1)-(2,2)
+
+@test_edges =
+  // Horizontal edges (east-west)
+  @Edge(0)(1)(10.0)(0)(0)(0)(1) <> 
+  @Edge(1)(2)(10.0)(0)(1)(0)(2) <> 
+  @Edge(3)(4)(10.0)(1)(0)(1)(1) <> 
+  @Edge(4)(5)(10.0)(1)(1)(1)(2) <> 
+  @Edge(6)(7)(10.0)(2)(0)(2)(1) <> 
+  @Edge(7)(8)(10.0)(2)(1)(2)(2) <> 
+  // Vertical edges (north-south)
+  @Edge(0)(3)(10.0)(0)(0)(1)(0) <> 
+  @Edge(1)(4)(10.0)(0)(1)(1)(1) <> 
+  @Edge(2)(5)(10.0)(0)(2)(1)(2) <> 
+  @Edge(3)(6)(10.0)(1)(0)(2)(0) <> 
+  @Edge(4)(7)(10.0)(1)(1)(2)(1) <> 
+  @Edge(5)(8)(10.0)(1)(2)(2)(2) <> 
+  []
+
+// ---- Main Test Entry Point ----
+
+@main = @evolve_edges(@test_edges)(@test_weather_tree)
+
+// Expected output: nested list of [time, [edge_weights]]
+// Each edge weight should reflect speed loss from wave height
+// Higher Hs → lower speed → higher time cost
