@@ -62,8 +62,8 @@ function get_grid(; force_rebuild=false)
     println("Building H3 grid (this takes a few minutes)...")
     grid = H3Grid.build_aegean_grid(
         coastline_path = COASTLINE,
-        base_res = 5,       # ~8 km in open water
-        coast_res = 7,      # ~1.2 km near islands
+        base_res = 6,       # ~3.2 km in open water (smoother routes)
+        coast_res = 8,      # ~0.5 km near islands (precise coastal navigation)
         refine_dist_km = 5.0,
         bbox = AEGEAN_BBOX,
     )

@@ -3,34 +3,47 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aegean H3 Route — Piraeus → Mykonos</title>
+  <title>Maritime Router — Aegean Sea</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a1a; color: #e0e0e0; }
-    #map { width: 100vw; height: 70vh; }
-    #panel { padding: 16px 24px; display: flex; gap: 24px; align-items: flex-start; }
-    #status { flex: 1; }
-    #status h2 { color: #4fc3f7; margin-bottom: 8px; font-size: 18px; }
-    #status .info { font-size: 13px; line-height: 1.8; color: #aaa; }
+    #map { width: 100vw; height: 65vh; }
+    #panel { padding: 12px 24px; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+    #status { flex: 1; min-width: 220px; }
+    #status h2 { color: #4fc3f7; margin-bottom: 6px; font-size: 17px; }
+    #status .info { font-size: 13px; line-height: 1.7; color: #aaa; }
     #status .info b { color: #e0e0e0; }
-    #controls { display: flex; flex-direction: column; gap: 8px; }
-    #controls select, #controls button {
-      padding: 8px 16px; border: 1px solid #333; border-radius: 6px;
+    #controls { display: flex; flex-direction: column; gap: 6px; min-width: 200px; }
+    #controls label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+    #controls select, #controls button, #controls input {
+      padding: 7px 12px; border: 1px solid #333; border-radius: 5px;
       background: #1a1a2e; color: #e0e0e0; font-size: 13px; cursor: pointer;
     }
-    #controls button { background: #e94560; border-color: #e94560; font-weight: 600; }
-    #controls button:hover { background: #c73850; }
-    #controls button:disabled { opacity: 0.4; cursor: not-allowed; }
-    #log { flex: 1; font-size: 12px; color: #666; max-height: 120px; overflow-y: auto; font-family: monospace; line-height: 1.6; }
+    #controls input { cursor: text; width: 100%; }
+    #controls select:focus, #controls input:focus { border-color: #4fc3f7; outline: none; }
+    .btn-row { display: flex; gap: 6px; }
+    .btn-row button { flex: 1; }
+    #btn-route { background: #e94560; border-color: #e94560; font-weight: 600; }
+    #btn-route:hover { background: #c73850; }
+    #btn-route:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-cancel { background: #333; border-color: #555; font-weight: 600; display: none; }
+    #btn-cancel:hover { background: #555; }
+    #log { flex: 1; min-width: 200px; font-size: 12px; color: #666; max-height: 120px; overflow-y: auto; font-family: monospace; line-height: 1.6; }
     #log .ok { color: #4caf50; }
     #log .err { color: #e94560; }
-    #wp-table { max-height: 28vh; overflow-y: auto; width: 100%; padding: 0 24px 16px; }
+    #log .warn { color: #ffb74d; }
+    #wp-table { max-height: 30vh; overflow-y: auto; width: 100%; padding: 0 24px 16px; }
     #wp-table table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace; }
     #wp-table th { position: sticky; top: 0; background: #0a0a1a; color: #4fc3f7; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; }
     #wp-table td { padding: 3px 8px; border-bottom: 1px solid #1a1a2e; }
     #wp-table tr:hover td { background: #1a1a2e; }
+    .algo-desc { font-size: 11px; color: #555; margin-top: 2px; min-height: 28px; line-height: 1.4; }
+    .timeout-row { display: flex; align-items: center; gap: 6px; }
+    .timeout-row input { width: 50px; text-align: center; padding: 5px 4px; }
+    .timeout-row span { font-size: 12px; color: #666; }
+    .elapsed { font-size: 12px; color: #ffb74d; font-family: monospace; min-height: 18px; }
   </style>
 </head>
 <body>
@@ -38,31 +51,84 @@
   <div id="panel">
     <div id="status">
       <h2>Maritime Router</h2>
-      <div class="info" id="info">Click "Route" to compute Piraeus → Mykonos via H3 grid.</div>
+      <div class="info" id="info">Select a route and algorithm, then click "Route".</div>
     </div>
     <div id="controls">
-      <select id="algo">
-        <option value="2" selected>Dijkstra</option>
-        <option value="3">ALT (A*)</option>
-        <option value="4">CCH</option>
-        <option value="5">Hub-Label</option>
-      </select>
+      <label>Route</label>
       <select id="route-select">
-        <option value="37.9475,23.6378,37.4467,25.3289" selected>Piraeus → Mykonos</option>
-        <option value="37.9475,23.6378,36.3932,25.4615">Piraeus → Santorini</option>
-        <option value="37.9475,23.6378,35.3387,25.1442">Piraeus → Heraklion</option>
-        <option value="40.6401,22.9444,38.3722,26.1367">Thessaloniki → Chios</option>
-        <option value="39.3666,22.9425,39.1622,23.4903">Volos → Skiathos</option>
+        <option value="37.9475,23.6378,37.4467,25.3289" selected>Piraeus - Mykonos</option>
+        <option value="37.9475,23.6378,36.3932,25.4615">Piraeus - Santorini</option>
+        <option value="37.9475,23.6378,35.3387,25.1442">Piraeus - Heraklion</option>
+        <option value="40.6401,22.9444,38.3722,26.1367">Thessaloniki - Chios</option>
+        <option value="39.3666,22.9425,39.1622,23.4903">Volos - Skiathos</option>
+        <option value="36.4510,28.2278,37.9475,23.6378">Rhodes - Piraeus</option>
+        <option value="40.9397,24.4014,39.8742,25.0636">Kavala - Limnos</option>
+        <option value="38.2466,21.7346,39.6243,19.9217">Patras - Corfu</option>
       </select>
-      <button id="btn-route" onclick="runPipeline()">Route</button>
+      <label>Algorithm</label>
+      <select id="algo" onchange="updateAlgoDesc()">
+        <option value="2" selected>Dijkstra</option>
+        <option value="3">ALT (A* Landmarks)</option>
+        <option value="4">CCH (Contraction Hierarchies)</option>
+        <option value="5">Hub Labeling</option>
+        <option value="0">APSP (All-Pairs Shortest)</option>
+        <option value="1">Superposition Enumerate</option>
+        <option value="6">Temporal (multi-weather)</option>
+      </select>
+      <div class="algo-desc" id="algo-desc">Classic shortest-path with Fibonacci heap. Reliable baseline.</div>
+      <label>Smoothing (Douglas-Peucker)</label>
+      <div class="timeout-row">
+        <input type="range" id="epsilon" min="0" max="0.05" step="0.001" value="0.005" style="width:120px;cursor:pointer" oninput="updateEpsLabel()">
+        <span id="eps-label">0.005&deg;</span>
+      </div>
+      <label>Timeout</label>
+      <div class="timeout-row">
+        <input type="number" id="timeout" value="30" min="5" max="300" step="5">
+        <span>seconds</span>
+      </div>
+      <div class="elapsed" id="elapsed"></div>
+      <div class="btn-row">
+        <button id="btn-route" onclick="runPipeline()">Route</button>
+        <button id="btn-cancel" onclick="cancelPipeline()">Cancel</button>
+      </div>
     </div>
     <div id="log"></div>
   </div>
   <div id="wp-table"></div>
 
 <script>
-const API = 'http://localhost:8080';
+const API = location.origin;
 let map, routeLine, markers = [];
+let abortCtrl = null;
+let elapsedTimer = null;
+let bgLine = null;
+
+const ALGO_INFO = {
+  0: { name: 'APSP', desc: 'Algebraic all-pairs via tropical semiring. HVM4 parallel matrix ops.' },
+  1: { name: 'Superposition', desc: 'HVM4 SUP-based path enumeration. Explores all paths simultaneously.' },
+  2: { name: 'Dijkstra', desc: 'Classic shortest-path with Fibonacci heap. Reliable baseline.' },
+  3: { name: 'ALT', desc: 'A* with landmark triangle inequality. Faster than Dijkstra on large graphs.' },
+  4: { name: 'CCH', desc: 'Customizable Contraction Hierarchies. Fast queries after preprocessing.' },
+  5: { name: 'Hub Label', desc: 'Pruned landmark labeling. Near-instant queries after index build.' },
+  6: { name: 'Temporal', desc: 'Time-dependent routing across multiple weather snapshots.' },
+};
+
+function updateAlgoDesc() {
+  const v = parseInt(document.getElementById('algo').value);
+  document.getElementById('algo-desc').textContent = ALGO_INFO[v]?.desc || '';
+}
+
+function updateEpsLabel() {
+  const v = parseFloat(document.getElementById('epsilon').value);
+  document.getElementById('eps-label').textContent = v === 0 ? 'off' : v.toFixed(3) + '\u00b0';
+  // Re-display if we have a cached route
+  if (lastRoute) {
+    displayRoute(lastRoute);
+    updateInfo(lastRoute, lastAlg, lastMs);
+  }
+}
+
+let lastRoute = null, lastAlg = '', lastMs = 0;
 
 // --- Map setup ---
 map = L.map('map').setView([37.8, 24.5], 7);
@@ -78,91 +144,172 @@ function log(msg, cls) {
   el.scrollTop = el.scrollHeight;
 }
 
+// --- Elapsed timer ---
+function startElapsed() {
+  const start = performance.now();
+  const el = document.getElementById('elapsed');
+  el.textContent = '0.0s';
+  elapsedTimer = setInterval(() => {
+    const s = ((performance.now() - start) / 1000).toFixed(1);
+    el.textContent = `${s}s elapsed`;
+  }, 100);
+}
+
+function stopElapsed() {
+  clearInterval(elapsedTimer);
+  elapsedTimer = null;
+}
+
 // --- API helpers ---
-async function post(path, body) {
+async function post(path, body, signal) {
   const res = await fetch(API + path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
   return res.json();
 }
 
+// --- Cancel ---
+function cancelPipeline() {
+  if (abortCtrl) {
+    abortCtrl.abort();
+    log('Cancelled by user', 'warn');
+  }
+}
+
+function setRunning(running) {
+  document.getElementById('btn-route').style.display = running ? 'none' : '';
+  document.getElementById('btn-cancel').style.display = running ? '' : 'none';
+  document.getElementById('route-select').disabled = running;
+  document.getElementById('algo').disabled = running;
+  document.getElementById('timeout').disabled = running;
+}
+
 // --- Pipeline ---
 async function runPipeline() {
-  const btn = document.getElementById('btn-route');
-  btn.disabled = true;
+  setRunning(true);
   document.getElementById('log').innerHTML = '';
   document.getElementById('wp-table').innerHTML = '';
+  document.getElementById('elapsed').textContent = '';
+
+  abortCtrl = new AbortController();
+  const signal = abortCtrl.signal;
+  const timeoutSec = parseInt(document.getElementById('timeout').value) || 30;
+
+  // Auto-abort after timeout
+  const timeoutId = setTimeout(() => {
+    if (abortCtrl) {
+      abortCtrl.abort();
+      log(`Timeout: algorithm exceeded ${timeoutSec}s limit`, 'err');
+    }
+  }, timeoutSec * 1000);
 
   try {
-    // Parse route
     const sel = document.getElementById('route-select').value.split(',').map(Number);
     const origin = [sel[0], sel[1]], dest = [sel[2], sel[3]];
     const alg = parseInt(document.getElementById('algo').value);
+    const isTemporal = alg === 6;
 
-    // 1. Init with H3 graph
+    // 1. Init
     log('Initializing with H3 graph...');
     const t0 = performance.now();
-    const init = await post('/api/init', { ship_speed: 15, max_wave: 4, graph_mode: 'h3' });
+    const init = await post('/api/init', { ship_speed: 15, max_wave: 4, graph_mode: 'h3' }, signal);
     log(`Initialized: ${init.node_count} nodes (${(performance.now()-t0)|0} ms)`, 'ok');
 
-    // 2. Set voyage
-    log(`Voyage: (${origin}) → (${dest})`);
-    await post('/api/voyage', { origin, destination: dest });
+    // 2. Voyage
+    const routeName = document.getElementById('route-select').selectedOptions[0].text;
+    log(`Voyage: ${routeName}`);
+    await post('/api/voyage', { origin, destination: dest }, signal);
 
-    // 3. Push weather (synthetic calm)
+    // 3. Weather
     const n = 25;
-    await post('/api/weather', {
+    const wxBase = {
       sw: [34.5, 19.0], ne: [41.5, 30.0], rows: 5, cols: 5,
       wind_speed: Array(n).fill(3), wind_dir: Array(n).fill(180),
       wave_height: Array(n).fill(0.5), wave_dir: Array(n).fill(180),
       current_speed: Array(n).fill(0.2), current_dir: Array(n).fill(90),
-      timestamp: 0,
-    });
-    log('Weather pushed', 'ok');
+    };
+    if (isTemporal) {
+      for (let h = 0; h < 3; h++) {
+        const wx = { ...wxBase, timestamp: h * 3600,
+          wave_height: Array(n).fill(0.5 + h * 0.3),
+          wind_speed: Array(n).fill(3 + h * 2) };
+        await post('/api/weather', wx, signal);
+      }
+      log('Weather pushed (3 temporal snapshots)', 'ok');
+    } else {
+      await post('/api/weather', { ...wxBase, timestamp: 0 }, signal);
+      log('Weather pushed', 'ok');
+    }
 
-    // 4. Route
-    const algNames = {0:'APSP',1:'Enumerate',2:'Dijkstra',3:'ALT',4:'CCH',5:'Hub-Label'};
-    log(`Routing with ${algNames[alg]}...`);
+    // 4. Route (this is the slow part — start elapsed timer)
+    const algName = ALGO_INFO[alg]?.name || `Alg ${alg}`;
+    log(`Routing with ${algName}... (timeout: ${timeoutSec}s)`);
+    startElapsed();
     const t1 = performance.now();
-    const route = await post('/api/route', { algorithm: alg });
+    let route;
+    if (isTemporal) {
+      route = await post('/api/route/temporal', {}, signal);
+    } else {
+      route = await post('/api/route', { algorithm: alg }, signal);
+    }
+    stopElapsed();
     const ms = (performance.now()-t1)|0;
-    log(`Route found: cost=${route.cost} (${route.cost_real.toFixed(1)} h), ${route.path_length} waypoints, ${ms} ms`, 'ok');
+    document.getElementById('elapsed').textContent = `${(ms/1000).toFixed(1)}s`;
+    log(`Route: cost=${route.cost} (${route.cost_real.toFixed(1)} h), ${route.path_length} wp, ${ms} ms`, 'ok');
 
-    // Display
+    lastRoute = route;
+    lastAlg = algName;
+    lastMs = ms;
     displayRoute(route);
-    updateInfo(route, algNames[alg], ms);
+    updateInfo(route, algName, ms);
 
   } catch (e) {
-    log(`Error: ${e.message}`, 'err');
-    console.error(e);
+    stopElapsed();
+    if (e.name === 'AbortError') {
+      log('Request aborted', 'warn');
+    } else {
+      log(`Error: ${e.message}`, 'err');
+      console.error(e);
+    }
   } finally {
-    btn.disabled = false;
+    clearTimeout(timeoutId);
+    abortCtrl = null;
+    setRunning(false);
   }
 }
 
 function displayRoute(route) {
-  // Clear previous
   if (routeLine) map.removeLayer(routeLine);
+  if (bgLine) map.removeLayer(bgLine);
   markers.forEach(m => map.removeLayer(m));
   markers = [];
+  bgLine = null;
 
-  const wps = route.waypoints;
-  if (!wps || !wps.length) return;
+  const rawWps = route.waypoints;
+  if (!rawWps || !rawWps.length) return;
 
-  // Route polyline
+  const epsilon = parseFloat(document.getElementById('epsilon').value) || 0;
+  const wps = epsilon > 0 ? simplifyRoute(rawWps, epsilon) : rawWps;
+
+  // Draw full-resolution route as faint background line
+  if (epsilon > 0 && rawWps.length > wps.length) {
+    const allLatLngs = rawWps.map(w => [w.lat, w.lon]);
+    bgLine = L.polyline(allLatLngs, { color: '#4fc3f7', weight: 1, opacity: 0.25, dashArray: '4,4' }).addTo(map);
+  }
+
   const latlngs = wps.map(w => [w.lat, w.lon]);
-  routeLine = L.polyline(latlngs, { color: '#e94560', weight: 3, opacity: 0.9 }).addTo(map);
+  routeLine = L.polyline(latlngs, { color: '#e94560', weight: 3, opacity: 0.9, smoothFactor: 1 }).addTo(map);
 
-  // Waypoint markers
   wps.forEach((wp, i) => {
     const isEnd = (i === 0 || i === wps.length - 1);
     const m = L.circleMarker([wp.lat, wp.lon], {
-      radius: isEnd ? 8 : 4,
+      radius: isEnd ? 7 : 3,
       fillColor: isEnd ? '#e94560' : '#4fc3f7',
-      fillOpacity: isEnd ? 1 : 0.7,
+      fillOpacity: isEnd ? 1 : 0.6,
       color: '#fff',
       weight: isEnd ? 2 : 1,
     }).addTo(map);
@@ -175,24 +322,29 @@ function displayRoute(route) {
     markers.push(m);
   });
 
-  // Fit map
   map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
 }
 
 function updateInfo(route, alg, ms) {
-  const wps = route.waypoints;
+  const rawWps = route.waypoints;
+  const epsilon = parseFloat(document.getElementById('epsilon').value) || 0;
+  const wps = epsilon > 0 ? simplifyRoute(rawWps, epsilon) : rawWps;
+
   let totalDist = 0;
   for (let i = 1; i < wps.length; i++) {
     totalDist += haversineNm(wps[i-1].lat, wps[i-1].lon, wps[i].lat, wps[i].lon);
   }
+  const wpLabel = epsilon > 0 && wps.length < rawWps.length
+    ? `${wps.length} (simplified from ${rawWps.length})`
+    : `${rawWps.length}`;
+
   document.getElementById('info').innerHTML =
     `<b>Algorithm:</b> ${alg} (${ms} ms)<br>` +
     `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} hours)<br>` +
-    `<b>Waypoints:</b> ${route.path_length}<br>` +
+    `<b>Waypoints:</b> ${wpLabel}<br>` +
     `<b>Distance:</b> ~${totalDist.toFixed(1)} nm<br>` +
-    `<b>ETA:</b> ${wps[wps.length-1].eta_hours.toFixed(1)} hours`;
+    `<b>ETA:</b> ${rawWps[rawWps.length-1].eta_hours.toFixed(1)} hours`;
 
-  // Waypoint table
   let html = '<table><tr><th>#</th><th>Lat</th><th>Lon</th><th>ETA</th><th>Speed</th><th>Wave</th><th>Wind</th><th>Hdg</th><th>Node</th></tr>';
   wps.forEach((wp, i) => {
     html += `<tr>
@@ -203,6 +355,41 @@ function updateInfo(route, alg, ms) {
   });
   html += '</table>';
   document.getElementById('wp-table').innerHTML = html;
+}
+
+// --- Douglas-Peucker simplification ---
+function perpDist(p, a, b) {
+  // Perpendicular distance from point p to line segment a-b (in degrees, approximate)
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx*dx + dy*dy;
+  if (len2 === 0) return Math.sqrt((p[0]-a[0])**2 + (p[1]-a[1])**2);
+  let t = ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const proj = [a[0] + t*dx, a[1] + t*dy];
+  return Math.sqrt((p[0]-proj[0])**2 + (p[1]-proj[1])**2);
+}
+
+function douglasPeucker(points, epsilon) {
+  if (points.length <= 2) return points;
+  let maxDist = 0, maxIdx = 0;
+  const first = points[0], last = points[points.length - 1];
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = perpDist(points[i], first, last);
+    if (d > maxDist) { maxDist = d; maxIdx = i; }
+  }
+  if (maxDist > epsilon) {
+    const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
+    const right = douglasPeucker(points.slice(maxIdx), epsilon);
+    return left.slice(0, -1).concat(right);
+  }
+  return [first, last];
+}
+
+function simplifyRoute(wps, epsilon) {
+  // Build index array so we can map back to original waypoints
+  const pts = wps.map((w, i) => [w.lat, w.lon, i]);
+  const simplified = douglasPeucker(pts, epsilon);
+  return simplified.map(p => wps[p[2]]);
 }
 
 function haversineNm(lat1, lon1, lat2, lon2) {
