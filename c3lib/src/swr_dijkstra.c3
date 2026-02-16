@@ -144,16 +144,27 @@ fn void FibHeap.consolidate(&self) {
     for (int i = 0; i < 64; i++) degree_table[i] = null;
 
     // Collect all root nodes first (since we modify the list)
-    FibNode*[1024] roots;
+    // Count roots first to size the buffer
     uint root_count = 0;
     FibNode* x = self.min;
     if (x != null) {
         FibNode* start = x;
         do {
-            roots[root_count++] = x;
+            root_count++;
             x = x.right;
-        } while (x != start && root_count < 1024);
+        } while (x != start);
     }
+    if (root_count == 0) return;
+
+    FibNode*[] roots = mem::new_array(FibNode*, root_count);
+    defer free(roots.ptr);
+    uint idx = 0;
+    x = self.min;
+    FibNode* start = x;
+    do {
+        roots[idx++] = x;
+        x = x.right;
+    } while (x != start);
 
     for (uint i = 0; i < root_count; i++) {
         x = roots[i];
@@ -214,22 +225,29 @@ fn void FibHeap.destroy(&self) {
 
 fn void destroy_tree(FibNode* node) {
     if (node == null) return;
+    // Count nodes in circular list
+    uint count = 0;
     FibNode* current = node;
-    FibNode*[1024] stack;
-    uint sp = 0;
-    // Collect all nodes in the circular list
     FibNode* start = current;
     do {
-        stack[sp++] = current;
+        count++;
         current = current.right;
-    } while (current != start && sp < 1024);
-    // Recursively destroy children, then free
-    for (uint i = 0; i < sp; i++) {
-        if (stack[i].child != null) {
-            destroy_tree(stack[i].child);
-        }
-        free(stack[i]);
+    } while (current != start);
+    // Collect
+    FibNode*[] siblings = mem::new_array(FibNode*, count);
+    current = start;
+    for (uint i = 0; i < count; i++) {
+        siblings[i] = current;
+        current = current.right;
     }
+    // Recursively destroy children, then free
+    for (uint i = 0; i < count; i++) {
+        if (siblings[i].child != null) {
+            destroy_tree(siblings[i].child);
+        }
+        free(siblings[i]);
+    }
+    free(siblings.ptr);
 }
 
 // ============================================================
@@ -274,17 +292,14 @@ fn swr::RouteResult? swr_dijkstra(swr::SwrState* state, swr::WeatherGrid* weathe
 
         if (du >= pathfind::INF) break; // remaining nodes unreachable
 
-        // Relax all outgoing edges of u
-        for (uint i = 0; i < state.prm.edge_count; i++) {
-            if (state.prm.edge_from[i] == u) {
-                uint v = state.prm.edge_to[i];
-                uint w = state.prm.edge_weight[i];
-                uint new_d = du + w;
-                if (new_d < dist[v]) {
-                    dist[v] = new_d;
-                    pred[v] = u;
-                    heap.decrease_key(nodes[v], new_d);
-                }
+        // Relax all outgoing edges of u via adjacency list: O(degree)
+        for (usz i = 0; i < state.prm.graph.adj[u].len(); i++) {
+            pathfind::Edge e = state.prm.graph.adj[u][i];
+            uint new_d = du + e.weight;
+            if (new_d < dist[e.to]) {
+                dist[e.to] = new_d;
+                pred[e.to] = u;
+                heap.decrease_key(nodes[e.to], new_d);
             }
         }
     }

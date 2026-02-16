@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aegean H3 Route — Piraeus → Mykonos</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a1a; color: #e0e0e0; }
+    #map { width: 100vw; height: 70vh; }
+    #panel { padding: 16px 24px; display: flex; gap: 24px; align-items: flex-start; }
+    #status { flex: 1; }
+    #status h2 { color: #4fc3f7; margin-bottom: 8px; font-size: 18px; }
+    #status .info { font-size: 13px; line-height: 1.8; color: #aaa; }
+    #status .info b { color: #e0e0e0; }
+    #controls { display: flex; flex-direction: column; gap: 8px; }
+    #controls select, #controls button {
+      padding: 8px 16px; border: 1px solid #333; border-radius: 6px;
+      background: #1a1a2e; color: #e0e0e0; font-size: 13px; cursor: pointer;
+    }
+    #controls button { background: #e94560; border-color: #e94560; font-weight: 600; }
+    #controls button:hover { background: #c73850; }
+    #controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #log { flex: 1; font-size: 12px; color: #666; max-height: 120px; overflow-y: auto; font-family: monospace; line-height: 1.6; }
+    #log .ok { color: #4caf50; }
+    #log .err { color: #e94560; }
+    #wp-table { max-height: 28vh; overflow-y: auto; width: 100%; padding: 0 24px 16px; }
+    #wp-table table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace; }
+    #wp-table th { position: sticky; top: 0; background: #0a0a1a; color: #4fc3f7; text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; }
+    #wp-table td { padding: 3px 8px; border-bottom: 1px solid #1a1a2e; }
+    #wp-table tr:hover td { background: #1a1a2e; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <div id="status">
+      <h2>Maritime Router</h2>
+      <div class="info" id="info">Click "Route" to compute Piraeus → Mykonos via H3 grid.</div>
+    </div>
+    <div id="controls">
+      <select id="algo">
+        <option value="2" selected>Dijkstra</option>
+        <option value="3">ALT (A*)</option>
+        <option value="4">CCH</option>
+        <option value="5">Hub-Label</option>
+      </select>
+      <select id="route-select">
+        <option value="37.9475,23.6378,37.4467,25.3289" selected>Piraeus → Mykonos</option>
+        <option value="37.9475,23.6378,36.3932,25.4615">Piraeus → Santorini</option>
+        <option value="37.9475,23.6378,35.3387,25.1442">Piraeus → Heraklion</option>
+        <option value="40.6401,22.9444,38.3722,26.1367">Thessaloniki → Chios</option>
+        <option value="39.3666,22.9425,39.1622,23.4903">Volos → Skiathos</option>
+      </select>
+      <button id="btn-route" onclick="runPipeline()">Route</button>
+    </div>
+    <div id="log"></div>
+  </div>
+  <div id="wp-table"></div>
+
+<script>
+const API = 'http://localhost:8080';
+let map, routeLine, markers = [];
+
+// --- Map setup ---
+map = L.map('map').setView([37.8, 24.5], 7);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18,
+}).addTo(map);
+
+// --- Logging ---
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  el.innerHTML += `<div class="${cls || ''}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// --- API helpers ---
+async function post(path, body) {
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+// --- Pipeline ---
+async function runPipeline() {
+  const btn = document.getElementById('btn-route');
+  btn.disabled = true;
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('wp-table').innerHTML = '';
+
+  try {
+    // Parse route
+    const sel = document.getElementById('route-select').value.split(',').map(Number);
+    const origin = [sel[0], sel[1]], dest = [sel[2], sel[3]];
+    const alg = parseInt(document.getElementById('algo').value);
+
+    // 1. Init with H3 graph
+    log('Initializing with H3 graph...');
+    const t0 = performance.now();
+    const init = await post('/api/init', { ship_speed: 15, max_wave: 4, graph_mode: 'h3' });
+    log(`Initialized: ${init.node_count} nodes (${(performance.now()-t0)|0} ms)`, 'ok');
+
+    // 2. Set voyage
+    log(`Voyage: (${origin}) → (${dest})`);
+    await post('/api/voyage', { origin, destination: dest });
+
+    // 3. Push weather (synthetic calm)
+    const n = 25;
+    await post('/api/weather', {
+      sw: [34.5, 19.0], ne: [41.5, 30.0], rows: 5, cols: 5,
+      wind_speed: Array(n).fill(3), wind_dir: Array(n).fill(180),
+      wave_height: Array(n).fill(0.5), wave_dir: Array(n).fill(180),
+      current_speed: Array(n).fill(0.2), current_dir: Array(n).fill(90),
+      timestamp: 0,
+    });
+    log('Weather pushed', 'ok');
+
+    // 4. Route
+    const algNames = {0:'APSP',1:'Enumerate',2:'Dijkstra',3:'ALT',4:'CCH',5:'Hub-Label'};
+    log(`Routing with ${algNames[alg]}...`);
+    const t1 = performance.now();
+    const route = await post('/api/route', { algorithm: alg });
+    const ms = (performance.now()-t1)|0;
+    log(`Route found: cost=${route.cost} (${route.cost_real.toFixed(1)} h), ${route.path_length} waypoints, ${ms} ms`, 'ok');
+
+    // Display
+    displayRoute(route);
+    updateInfo(route, algNames[alg], ms);
+
+  } catch (e) {
+    log(`Error: ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function displayRoute(route) {
+  // Clear previous
+  if (routeLine) map.removeLayer(routeLine);
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+
+  const wps = route.waypoints;
+  if (!wps || !wps.length) return;
+
+  // Route polyline
+  const latlngs = wps.map(w => [w.lat, w.lon]);
+  routeLine = L.polyline(latlngs, { color: '#e94560', weight: 3, opacity: 0.9 }).addTo(map);
+
+  // Waypoint markers
+  wps.forEach((wp, i) => {
+    const isEnd = (i === 0 || i === wps.length - 1);
+    const m = L.circleMarker([wp.lat, wp.lon], {
+      radius: isEnd ? 8 : 4,
+      fillColor: isEnd ? '#e94560' : '#4fc3f7',
+      fillOpacity: isEnd ? 1 : 0.7,
+      color: '#fff',
+      weight: isEnd ? 2 : 1,
+    }).addTo(map);
+    m.bindPopup(`<b>${i === 0 ? 'Origin' : i === wps.length-1 ? 'Destination' : 'WP ' + i}</b><br>
+      Node ${wp.node_id}<br>
+      ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}<br>
+      ETA: ${wp.eta_hours.toFixed(1)} h | ${wp.speed_knots.toFixed(1)} kt<br>
+      Wave: ${wp.wave_height.toFixed(1)} m | Wind: ${wp.wind_speed.toFixed(1)} kt<br>
+      Hdg: ${wp.heading_deg.toFixed(0)}&deg;`);
+    markers.push(m);
+  });
+
+  // Fit map
+  map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
+}
+
+function updateInfo(route, alg, ms) {
+  const wps = route.waypoints;
+  let totalDist = 0;
+  for (let i = 1; i < wps.length; i++) {
+    totalDist += haversineNm(wps[i-1].lat, wps[i-1].lon, wps[i].lat, wps[i].lon);
+  }
+  document.getElementById('info').innerHTML =
+    `<b>Algorithm:</b> ${alg} (${ms} ms)<br>` +
+    `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} hours)<br>` +
+    `<b>Waypoints:</b> ${route.path_length}<br>` +
+    `<b>Distance:</b> ~${totalDist.toFixed(1)} nm<br>` +
+    `<b>ETA:</b> ${wps[wps.length-1].eta_hours.toFixed(1)} hours`;
+
+  // Waypoint table
+  let html = '<table><tr><th>#</th><th>Lat</th><th>Lon</th><th>ETA</th><th>Speed</th><th>Wave</th><th>Wind</th><th>Hdg</th><th>Node</th></tr>';
+  wps.forEach((wp, i) => {
+    html += `<tr>
+      <td>${i+1}</td><td>${wp.lat.toFixed(4)}</td><td>${wp.lon.toFixed(4)}</td>
+      <td>${wp.eta_hours.toFixed(1)}h</td><td>${wp.speed_knots.toFixed(1)}kt</td>
+      <td>${wp.wave_height.toFixed(1)}m</td><td>${wp.wind_speed.toFixed(1)}</td>
+      <td>${wp.heading_deg.toFixed(0)}&deg;</td><td>${wp.node_id}</td></tr>`;
+  });
+  html += '</table>';
+  document.getElementById('wp-table').innerHTML = html;
+}
+
+function haversineNm(lat1, lon1, lat2, lon2) {
+  const R = 3440.065;
+  const dLat = (lat2-lat1) * Math.PI/180, dLon = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+</script>
+</body>
+</html>
