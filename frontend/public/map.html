@@ -71,8 +71,6 @@
         <option value="3">ALT (A* Landmarks)</option>
         <option value="4">CCH (Contraction Hierarchies)</option>
         <option value="5">Hub Labeling</option>
-        <option value="0">APSP (All-Pairs Shortest)</option>
-        <option value="1">Superposition Enumerate</option>
         <option value="6">Temporal (multi-weather)</option>
       </select>
       <div class="algo-desc" id="algo-desc">Classic shortest-path with Fibonacci heap. Reliable baseline.</div>
@@ -104,8 +102,6 @@ let elapsedTimer = null;
 let bgLine = null;
 
 const ALGO_INFO = {
-  0: { name: 'APSP', desc: 'Algebraic all-pairs via tropical semiring. HVM4 parallel matrix ops.' },
-  1: { name: 'Superposition', desc: 'HVM4 SUP-based path enumeration. Explores all paths simultaneously.' },
   2: { name: 'Dijkstra', desc: 'Classic shortest-path with Fibonacci heap. Reliable baseline.' },
   3: { name: 'ALT', desc: 'A* with landmark triangle inequality. Faster than Dijkstra on large graphs.' },
   4: { name: 'CCH', desc: 'Customizable Contraction Hierarchies. Fast queries after preprocessing.' },

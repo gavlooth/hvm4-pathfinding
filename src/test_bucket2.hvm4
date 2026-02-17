@@ -1,9 +1,0 @@
-@bucket_get_idx = λbucket. λ{[]: 0; <>: λidx. λtail. idx}(bucket)
-@bucket_get_nodes = λbucket. λ{[]: []; <>: λidx. λtail. λ{[]: []; <>: λnodes. λr. nodes}(tail)}(bucket)
-
-@test_bucket = [0, 5 <> 3 <> []]
-
-@main = [
-  @bucket_get_idx(@test_bucket),
-  @bucket_get_nodes(@test_bucket)
-]
