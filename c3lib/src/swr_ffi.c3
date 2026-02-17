@@ -1,10 +1,6 @@
 module swr_ffi;
 import swr;
-import swr_temporal;
 import swr_dijkstra;
-import swr_alt;
-import swr_cch;
-import swr_hub;
 import pathfind;
 import std::math;
 
@@ -375,37 +371,6 @@ fn void* swr_route(void* state_handle, int algorithm) @export("swr_route") {
         .result = result,
         .parent = fs,
         .weather_idx = (int)grid_idx
-    };
-    return (void*)fr;
-}
-
-fn void* swr_route_temporal(void* state_handle) @export("swr_route_temporal") {
-    if (state_handle == null) return null;
-    FfiState* fs = (FfiState*)state_handle;
-    if (fs.state.prm.n == 0) return null;
-    if (fs.forecast_count < 2) return null;
-
-    // Build WeatherForecast from pushed grids
-    swr::WeatherForecast forecast = {
-        .grids = fs.forecast_grids[:fs.forecast_count],
-        .count = fs.forecast_count,
-        .interval_hours = fs.interval_hours,
-        .wait_cost = fs.wait_cost
-    };
-    fs.state.forecast = &forecast;
-
-    swr::RouteResult result = swr_temporal::swr_route_temporal(&fs.state, &forecast) ?? (swr::RouteResult){};
-    if (result.total_cost == 0 && result.path_len == 0 && result.dist_count == 0) return null;
-
-    FfiRoute* fr = mem::new(FfiRoute);
-    if (fr == null) {
-        result.destroy();
-        return null;
-    }
-    *fr = (FfiRoute){
-        .result = result,
-        .parent = fs,
-        .weather_idx = -1  // temporal
     };
     return (void*)fr;
 }

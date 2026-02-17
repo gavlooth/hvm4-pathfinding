@@ -197,22 +197,6 @@ function handle_route(req)
     ))
 end
 
-function handle_route_temporal(req)
-    STATE.initialized || return error_response("not initialized")
-
-    STATE.result = route_temporal(STATE.routing)
-    c = cost(STATE.result)
-    pl = path_length(STATE.result)
-    wps = waypoints(STATE.result)
-
-    json_response(Dict(
-        :cost => c,
-        :cost_real => Float64(c) / Float64(STATE.scale),
-        :path_length => pl,
-        :waypoints => [wp_to_dict(wp) for wp in wps],
-    ))
-end
-
 function handle_state(req)
     nc = STATE.initialized ? ShipRouting.node_count(STATE.routing) : 0
     json_response(Dict(
@@ -247,8 +231,6 @@ function route_handler(req)
             return handle_weather_clear(req)
         elseif method == "POST" && target == "/api/route"
             return handle_route(req)
-        elseif method == "POST" && target == "/api/route/temporal"
-            return handle_route_temporal(req)
         elseif method == "GET" && target == "/api/state"
             return handle_state(req)
         elseif method == "GET" && (target == "/" || target == "/map")
@@ -279,7 +261,7 @@ end
 function main()
     port = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 8080
 
-    println("Initializing HVM4 runtime...")
+    println("Initializing routing runtime...")
     ShipRouting.init()
 
     println("Starting server on http://0.0.0.0:$port")
@@ -288,8 +270,7 @@ function main()
     println("  POST /api/voyage        — set origin/destination")
     println("  POST /api/weather       — push weather grid")
     println("  POST /api/weather/clear — clear weather grids")
-    println("  POST /api/route         — compute route")
-    println("  POST /api/route/temporal — temporal route")
+    println("  POST /api/route         — compute route (Dijkstra)")
     println("  GET  /api/state         — server state")
 
     HTTP.serve(route_handler, "0.0.0.0", port)

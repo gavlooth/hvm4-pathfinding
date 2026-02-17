@@ -1,10 +1,6 @@
 module swr;
 import pathfind;
 import swr_dijkstra;
-import swr_alt;
-import swr_cch;
-import swr_hub;
-import swr_temporal;
 import std::math;
 import std::io;
 
@@ -93,10 +89,6 @@ enum Algorithm : char {
     APSP,
     ENUMERATE,
     DIJKSTRA,
-    ALT,
-    CCH,
-    HUB_LABEL,
-    TEMPORAL
 }
 
 struct RouteResult {
@@ -658,9 +650,5 @@ fn RouteResult? swr_replan(SwrState* state, WeatherGrid* weather, Algorithm algo
         case APSP: return swr_route_apsp(state, weather);
         case ENUMERATE: return swr_route_enumerate(state, weather);
         case DIJKSTRA: return swr_dijkstra::swr_dijkstra(state, weather);
-        case ALT: return swr_alt::swr_route_alt(state, weather);
-        case CCH: return swr_cch::swr_route_cch(state, weather);
-        case HUB_LABEL: return swr_hub::swr_route_hub(state, weather);
-        case TEMPORAL: return swr_temporal::swr_route_temporal(state, state.forecast);
     }
 }

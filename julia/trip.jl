@@ -142,12 +142,7 @@ function run_trip(;
 
     # Step 6: Route!
     alg_names = Dict(
-        ShipRouting.APSP => "APSP",
-        ShipRouting.ENUMERATE => "Enumerate",
         ShipRouting.DIJKSTRA => "Dijkstra",
-        ShipRouting.ALT => "ALT",
-        ShipRouting.CCH => "CCH",
-        ShipRouting.HUB_LABEL => "Hub-Label",
     )
     println("\nRouting with $(get(alg_names, algorithm, "?"))...")
     result = ShipRouting.route(state, algorithm=algorithm)

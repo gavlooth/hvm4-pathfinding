@@ -1,11 +1,11 @@
 """
     ShipRouting
 
-Julia wrapper for the HVM4 Ship Weather Routing (SWR) FFI library.
+Julia wrapper for the Ship Weather Routing (SWR) FFI library.
 
-Provides type-safe access to 7 routing algorithms (APSP, Enumerate, Dijkstra, ALT,
-CCH, Hub-Label, Temporal) with full ship physics, weather interpolation, PRM graph
-construction, and per-waypoint metadata (lat/lon/ETA/speed/wave/wind/heading).
+Provides type-safe access to Dijkstra routing with full ship physics, weather
+interpolation, graph construction, and per-waypoint metadata
+(lat/lon/ETA/speed/wave/wind/heading).
 
 # Quick Start
 ```julia
@@ -26,7 +26,7 @@ module ShipRouting
 
 export LatLon, WaypointInfo, WeatherGrid, CostMode, Algorithm
 export TIME_ONLY, FUEL_ONLY, WEIGHTED_SUM, SAFETY_PENALIZED
-export APSP, ENUMERATE, DIJKSTRA, ALT, CCH, HUB_LABEL, TEMPORAL
+export APSP, ENUMERATE, DIJKSTRA
 export RoutingState, RouteResult
 export create_state, set_land!, build_prm!, set_graph!, set_voyage!
 export push_weather!, set_forecast_interval!, clear_weather!
@@ -83,10 +83,6 @@ end
     APSP       = 0
     ENUMERATE  = 1
     DIJKSTRA   = 2
-    ALT        = 3
-    CCH        = 4
-    HUB_LABEL  = 5
-    TEMPORAL   = 6
 end
 
 # ============================================================
@@ -378,7 +374,7 @@ end
 Run a static routing algorithm using the last pushed weather grid.
 Returns an opaque `RouteResult` handle (automatically freed on GC).
 
-Available algorithms: `APSP`, `ENUMERATE`, `DIJKSTRA`, `ALT`, `CCH`, `HUB_LABEL`.
+Available algorithms: `DIJKSTRA`.
 """
 function route(state::RoutingState; algorithm::Algorithm = DIJKSTRA)
     ptr = ccall((:swr_route, LIBPATH), Ptr{Cvoid},

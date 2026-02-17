@@ -4,7 +4,6 @@ import bench_closure;
 import bench_path_enum;
 import bench_bidir_bfs;
 import bench_dag_dp;
-import bench_temporal;
 import bench_graph_gen;
 import std::io;
 
@@ -64,10 +63,4 @@ fn void run_bench_tests(int* pass, int* fail) {
         }
     }
 
-    // Temporal: V=30 * T=4 = 120 nodes (all 4 algorithms including CCH/Hub)
-    if (bench_temporal::run(30, 4, 4)) {
-        io::printn("PASS  bench_temporal"); (*pass)++;
-    } else {
-        io::printn("FAIL  bench_temporal"); (*fail)++;
-    }
 }

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Ship Weather Routing (SWR) engine with H3 hexagonal grid, multiple pathfinding algorithms, and Leaflet map frontend.
+Ship Weather Routing (SWR) engine with H3 hexagonal grid, Dijkstra pathfinding, and Leaflet map frontend.
 
 ## Build & Test
 
@@ -16,20 +16,10 @@ julia julia/trip.jl --build-grid     # Rebuild H3 grid cache
 ## Project Structure
 
 ```
-c3lib/src/       — C3 routing engine (Dijkstra, ALT, CCH, Hub Label, Temporal)
+c3lib/src/       — C3 routing engine (Dijkstra with Fibonacci heap)
 julia/           — Julia wrappers (ShipRouting.jl, H3Grid.jl, server.jl, trip.jl)
 frontend/public/ — Leaflet map UI (map.html)
 ```
-
-## Algorithms
-
-| # | Algorithm | Description |
-|---|-----------|-------------|
-| 2 | Dijkstra  | Fibonacci heap shortest path |
-| 3 | ALT       | A* with landmark triangle inequality |
-| 4 | CCH       | Customizable Contraction Hierarchies |
-| 5 | Hub Label | Pruned landmark labeling |
-| 6 | Temporal  | Time-dependent multi-weather routing |
 
 ## H3 Grid
 

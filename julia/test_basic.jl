@@ -90,35 +90,6 @@ end
 clear_weather!(state)
 check(true, "clear_weather")
 
-# --- ALT algorithm ---
-push_weather!(state, grid)
-result_alt = route(state, algorithm=ALT)
-c_alt = cost(result_alt)
-check(c_alt > 0, "route_alt_cost=$c_alt")
-
-# --- Temporal routing ---
-clear_weather!(state)
-push_weather!(state, grid)
-# Push a second grid for temporal
-grid2 = WeatherGrid(
-    LatLon(37.0, 23.0), LatLon(39.0, 27.0),
-    UInt32(2), UInt32(2),
-    fill(10.0, 4),   # stronger wind
-    fill(270.0, 4),
-    fill(2.0, 4),    # higher waves
-    fill(270.0, 4),
-    fill(0.5, 4),
-    fill(180.0, 4),
-    6.0              # 6 hours later
-)
-push_weather!(state, grid2)
-set_forecast_interval!(state, interval_hours=6, wait_cost=50)
-
-result_temporal = route_temporal(state)
-check(result_temporal.ptr != C_NULL, "route_temporal")
-tc = cost(result_temporal)
-check(tc > 0, "temporal_cost=$tc")
-
 # --- Cleanup ---
 ShipRouting.cleanup()
 

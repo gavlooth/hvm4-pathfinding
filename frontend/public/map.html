@@ -66,14 +66,9 @@
         <option value="38.2466,21.7346,39.6243,19.9217">Patras - Corfu</option>
       </select>
       <label>Algorithm</label>
-      <select id="algo" onchange="updateAlgoDesc()">
+      <select id="algo" disabled>
         <option value="2" selected>Dijkstra</option>
-        <option value="3">ALT (A* Landmarks)</option>
-        <option value="4">CCH (Contraction Hierarchies)</option>
-        <option value="5">Hub Labeling</option>
-        <option value="6">Temporal (multi-weather)</option>
       </select>
-      <div class="algo-desc" id="algo-desc">Classic shortest-path with Fibonacci heap. Reliable baseline.</div>
       <label>Smoothing (Douglas-Peucker)</label>
       <div class="timeout-row">
         <input type="range" id="epsilon" min="0" max="0.05" step="0.001" value="0.005" style="width:120px;cursor:pointer" oninput="updateEpsLabel()">
@@ -102,17 +97,8 @@ let elapsedTimer = null;
 let bgLine = null;
 
 const ALGO_INFO = {
-  2: { name: 'Dijkstra', desc: 'Classic shortest-path with Fibonacci heap. Reliable baseline.' },
-  3: { name: 'ALT', desc: 'A* with landmark triangle inequality. Faster than Dijkstra on large graphs.' },
-  4: { name: 'CCH', desc: 'Customizable Contraction Hierarchies. Fast queries after preprocessing.' },
-  5: { name: 'Hub Label', desc: 'Pruned landmark labeling. Near-instant queries after index build.' },
-  6: { name: 'Temporal', desc: 'Time-dependent routing across multiple weather snapshots.' },
+  2: { name: 'Dijkstra', desc: 'Classic shortest-path with Fibonacci heap.' },
 };
-
-function updateAlgoDesc() {
-  const v = parseInt(document.getElementById('algo').value);
-  document.getElementById('algo-desc').textContent = ALGO_INFO[v]?.desc || '';
-}
 
 function updateEpsLabel() {
   const v = parseFloat(document.getElementById('epsilon').value);
@@ -206,8 +192,7 @@ async function runPipeline() {
   try {
     const sel = document.getElementById('route-select').value.split(',').map(Number);
     const origin = [sel[0], sel[1]], dest = [sel[2], sel[3]];
-    const alg = parseInt(document.getElementById('algo').value);
-    const isTemporal = alg === 6;
+    const alg = 2;
 
     // 1. Init
     log('Initializing with H3 graph...');
@@ -228,30 +213,15 @@ async function runPipeline() {
       wave_height: Array(n).fill(0.5), wave_dir: Array(n).fill(180),
       current_speed: Array(n).fill(0.2), current_dir: Array(n).fill(90),
     };
-    if (isTemporal) {
-      for (let h = 0; h < 3; h++) {
-        const wx = { ...wxBase, timestamp: h * 3600,
-          wave_height: Array(n).fill(0.5 + h * 0.3),
-          wind_speed: Array(n).fill(3 + h * 2) };
-        await post('/api/weather', wx, signal);
-      }
-      log('Weather pushed (3 temporal snapshots)', 'ok');
-    } else {
-      await post('/api/weather', { ...wxBase, timestamp: 0 }, signal);
-      log('Weather pushed', 'ok');
-    }
+    await post('/api/weather', { ...wxBase, timestamp: 0 }, signal);
+    log('Weather pushed', 'ok');
 
     // 4. Route (this is the slow part — start elapsed timer)
     const algName = ALGO_INFO[alg]?.name || `Alg ${alg}`;
     log(`Routing with ${algName}... (timeout: ${timeoutSec}s)`);
     startElapsed();
     const t1 = performance.now();
-    let route;
-    if (isTemporal) {
-      route = await post('/api/route/temporal', {}, signal);
-    } else {
-      route = await post('/api/route', { algorithm: alg }, signal);
-    }
+    const route = await post('/api/route', { algorithm: alg }, signal);
     stopElapsed();
     const ms = (performance.now()-t1)|0;
     document.getElementById('elapsed').textContent = `${(ms/1000).toFixed(1)}s`;
