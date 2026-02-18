@@ -270,12 +270,15 @@ function handle_vine_route(req)
     src_node = src_idx - 1  # 0-indexed for Vine
     tgt_node = tgt_idx - 1
 
+    # Map algorithm name to numeric ID: 0=dijkstra, 1=delta_stepping
+    algo_id = algo == "delta_stepping" ? 1 : 0
+
     t0 = time()
     output = VineRouting.vine_route_graph(
         STATE.vine,
         STATE.csr_row_ptr, STATE.csr_col_idx, STATE.csr_weights,
         Int(src_node), Int(tgt_node);
-        workers=workers)
+        algorithm=algo_id, workers=workers)
     elapsed = time() - t0
 
     result = VineRouting.parse_route_output(output)

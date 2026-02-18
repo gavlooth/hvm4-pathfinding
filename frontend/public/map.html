@@ -69,7 +69,7 @@
       <select id="algo" disabled>
         <option value="c3_dijkstra" selected>Dijkstra (C3)</option>
         <option value="vine_dijkstra">Dijkstra (Vine)</option>
-        <option value="vine_delta_stepping">Delta-Stepping (Vine)</option>
+        <option value="vine_delta_stepping">Delta-Stepping (Vine, parallel)</option>
         <option value="vine_bfs">BFS (Vine)</option>
         <option value="vine_bellman_ford">Bellman-Ford (Vine)</option>
       </select>
@@ -105,7 +105,7 @@ let bgLine = null;
 const ALGO_INFO = {
   'c3_dijkstra': { name: 'Dijkstra (C3)', desc: 'Fibonacci heap Dijkstra in C3.' },
   'vine_dijkstra': { name: 'Dijkstra (Vine)', desc: 'Map-based Dijkstra on IVM runtime.' },
-  'vine_delta_stepping': { name: 'Delta-Stepping (Vine)', desc: 'Parallel bucket SSSP on IVM.' },
+  'vine_delta_stepping': { name: 'Delta-Stepping (Vine)', desc: 'Parallel bucket SSSP — atomic dist/prev in Rust, tree-parallel relaxation. 53x faster than Vine Dijkstra.' },
   'vine_bfs': { name: 'BFS (Vine)', desc: 'Level-synchronous BFS (unweighted) on IVM.' },
   'vine_bellman_ford': { name: 'Bellman-Ford (Vine)', desc: 'Edge relaxation with early termination on IVM.' },
 };

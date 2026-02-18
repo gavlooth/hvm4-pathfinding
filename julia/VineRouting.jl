@@ -101,13 +101,14 @@ function vine_route(state::VineState, input::String; workers::Integer = 1)
 end
 
 """
-    vine_route_graph(state, row_ptr, col_idx, weights, source, target; workers=4) -> String
+    vine_route_graph(state, row_ptr, col_idx, weights, source, target; algorithm=0, workers=4) -> String
 
-Execute Dijkstra with graph data passed directly as CSR arrays (no text parsing).
+Execute pathfinding with graph data passed directly as CSR arrays (no text parsing).
 - `row_ptr`: UInt32 array of length V+1
 - `col_idx`: UInt32 array of length E (edge targets)
 - `weights`: UInt32 array of length E (edge weights)
 - `source`, `target`: 0-indexed node IDs
+- `algorithm`: 0=dijkstra, 1=delta_stepping (parallel)
 """
 function vine_route_graph(
     state::VineState,
@@ -116,6 +117,7 @@ function vine_route_graph(
     weights::Vector{UInt32},
     source::Integer,
     target::Integer;
+    algorithm::Integer = 0,
     workers::Integer = 4
 )
     state.ptr == C_NULL && error("VineState has been destroyed")
@@ -127,11 +129,11 @@ function vine_route_graph(
     rc = GC.@preserve row_ptr col_idx weights out_buf begin
         ccall((:vine_route_graph, LIBPATH), Cint,
             (Ptr{Cvoid}, Cuint, Ptr{Cuint}, Ptr{Cuint}, Ptr{Cuint},
-             Cuint, Cuint, Cuint,
+             Cuint, Cuint, Cuint, Cuint,
              Ptr{UInt8}, Cuint, Ptr{Cuint}),
             state.ptr, node_count,
             pointer(row_ptr), pointer(col_idx), pointer(weights),
-            Cuint(source), Cuint(target), Cuint(workers),
+            Cuint(source), Cuint(target), Cuint(algorithm), Cuint(workers),
             pointer(out_buf), Cuint(length(out_buf)), out_written)
     end
 

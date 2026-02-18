@@ -6,3 +6,4 @@ pub mod delta_stepping;
 pub mod parallel_bfs;
 pub mod parallel_bellman_ford;
 pub mod dijkstra_ffi;
+pub mod delta_stepping_ffi;

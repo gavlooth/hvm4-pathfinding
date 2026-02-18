@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::io::{Cursor, Read};
 use std::os::raw::{c_char, c_int, c_uint};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ivy::ast::Nets;
@@ -58,6 +60,184 @@ impl GraphCSR {
             let start = *self.row_ptr.add(node as usize);
             *self.weights.add((start + idx) as usize)
         }
+    }
+}
+
+// ============================================================
+// Delta-Stepping State (atomic dist/prev + bucket management)
+// ============================================================
+
+const INF_U32: u32 = 999999;
+
+fn pack_dist_prev(dist: u32, prev: u32) -> u64 {
+    ((dist as u64) << 32) | (prev as u64)
+}
+
+fn unpack_dist(val: u64) -> u32 {
+    (val >> 32) as u32
+}
+
+fn unpack_prev(val: u64) -> u32 {
+    val as u32
+}
+
+/// Mutable state for delta-stepping, shared across IVM worker threads.
+/// dist/prev combined into AtomicU64 for race-free CAS updates.
+/// Buckets protected by Mutex (concurrent pushes from parallel relaxations).
+struct DeltaState {
+    graph: Arc<GraphCSR>,
+    delta: u32,
+    /// Combined dist|prev: high 32 = distance, low 32 = predecessor
+    state: Vec<AtomicU64>,
+    /// Current batch of vertices being processed (filled by next_batch_size)
+    current_batch: Mutex<Vec<u32>>,
+    /// Light-edge targets — same bucket, processed before advancing
+    light_pending: Mutex<Vec<u32>>,
+    /// Future buckets: bucket_idx -> vertex list
+    buckets: Mutex<BTreeMap<u32, Vec<u32>>>,
+}
+
+impl DeltaState {
+    fn new(graph: Arc<GraphCSR>) -> Self {
+        let n = graph.node_count as usize;
+        let source = graph.source;
+
+        // Compute delta as average edge weight
+        let total_edges = unsafe { *graph.row_ptr.add(n) } as usize;
+        let delta = if total_edges > 0 {
+            let sum: u64 = (0..total_edges)
+                .map(|i| unsafe { *graph.weights.add(i) } as u64)
+                .sum();
+            ((sum / total_edges as u64) as u32).max(1)
+        } else {
+            1
+        };
+
+        // Initialize state: all (INF, INF) except source (0, source)
+        let state: Vec<AtomicU64> = (0..n)
+            .map(|i| {
+                if i == source as usize {
+                    AtomicU64::new(pack_dist_prev(0, source))
+                } else {
+                    AtomicU64::new(pack_dist_prev(INF_U32, INF_U32))
+                }
+            })
+            .collect();
+
+        // Initial bucket: source in bucket 0
+        let mut buckets = BTreeMap::new();
+        buckets.insert(0u32, vec![source]);
+
+        DeltaState {
+            graph,
+            delta,
+            state,
+            current_batch: Mutex::new(Vec::new()),
+            light_pending: Mutex::new(Vec::new()),
+            buckets: Mutex::new(buckets),
+        }
+    }
+
+    /// Pop next batch of vertices to process.
+    /// Priority: light_pending (same bucket) > next bucket from BTreeMap.
+    /// Returns batch size (0 = algorithm complete).
+    fn next_batch_size(&self) -> u32 {
+        let mut batch = self.current_batch.lock().unwrap();
+        batch.clear();
+
+        // Priority 1: light pending (same bucket, inner loop)
+        {
+            let mut light = self.light_pending.lock().unwrap();
+            if !light.is_empty() {
+                std::mem::swap(&mut *batch, &mut *light);
+                return batch.len() as u32;
+            }
+        }
+
+        // Priority 2: next bucket
+        {
+            let mut buckets = self.buckets.lock().unwrap();
+            let key = match buckets.keys().next() {
+                Some(&k) => k,
+                None => return 0,
+            };
+            if let Some(vertices) = buckets.remove(&key) {
+                *batch = vertices;
+                return batch.len() as u32;
+            }
+        }
+
+        0
+    }
+
+    fn batch_vertex(&self, i: u32) -> u32 {
+        let batch = self.current_batch.lock().unwrap();
+        batch[i as usize]
+    }
+
+    /// Relax all neighbors of vertex u using atomic CAS.
+    /// Thread-safe: multiple IVM workers can call this concurrently.
+    fn relax_vertex(&self, u: u32) -> u32 {
+        let du = unpack_dist(self.state[u as usize].load(Ordering::Relaxed));
+        if du == INF_U32 {
+            return 0;
+        }
+
+        let degree = self.graph.degree(u);
+        let mut updates = 0u32;
+
+        for i in 0..degree {
+            let v = self.graph.adj_target(u, i);
+            let w = self.graph.adj_weight(u, i);
+            let nd = du.saturating_add(w);
+            if nd >= INF_U32 {
+                continue;
+            }
+
+            // Atomic CAS on combined dist|prev — race-free update
+            loop {
+                let old = self.state[v as usize].load(Ordering::Relaxed);
+                let old_dist = unpack_dist(old);
+                if nd >= old_dist {
+                    break;
+                }
+                let new_val = pack_dist_prev(nd, u);
+                match self.state[v as usize].compare_exchange_weak(
+                    old,
+                    new_val,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // Push to appropriate bucket
+                        if w < self.delta {
+                            self.light_pending.lock().unwrap().push(v);
+                        } else {
+                            let bucket_idx = nd / self.delta;
+                            self.buckets
+                                .lock()
+                                .unwrap()
+                                .entry(bucket_idx)
+                                .or_default()
+                                .push(v);
+                        }
+                        updates += 1;
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        updates
+    }
+
+    fn get_dist(&self, v: u32) -> u32 {
+        unpack_dist(self.state[v as usize].load(Ordering::Relaxed))
+    }
+
+    fn get_prev(&self, v: u32) -> u32 {
+        unpack_prev(self.state[v as usize].load(Ordering::Relaxed))
     }
 }
 
@@ -174,6 +354,7 @@ pub unsafe extern "C" fn vine_route_graph(
     weights: *const c_uint,
     source: c_uint,
     target: c_uint,
+    algorithm: c_uint,
     workers: c_uint,
     out_buf: *mut u8,
     out_len: c_uint,
@@ -190,7 +371,7 @@ pub unsafe extern "C" fn vine_route_graph(
         target,
     });
 
-    match run_vine_graph(&state.nets, graph, workers as usize) {
+    match run_vine_graph(&state.nets, graph, algorithm, workers as usize) {
         Ok(output) => write_output(output.as_bytes(), out_buf, out_len, out_written),
         Err(e) => {
             eprintln!("vine_route_graph error: {e}");
@@ -259,7 +440,13 @@ fn run_vine_text(nets: &Nets, input: &str, workers: usize) -> Result<String, Str
 }
 
 /// Run compiled Vine with graph FFI extrinsics (no text parsing).
-fn run_vine_graph(nets: &Nets, graph: Arc<GraphCSR>, workers: usize) -> Result<String, String> {
+/// algorithm: 0=dijkstra, 1=delta_stepping
+fn run_vine_graph(
+    nets: &Nets,
+    graph: Arc<GraphCSR>,
+    algorithm: u32,
+    workers: usize,
+) -> Result<String, String> {
     let heap = Heap::new();
     let mut host = &mut Host::default();
     let mut extrinsics = Extrinsics::default();
@@ -273,7 +460,24 @@ fn run_vine_graph(nets: &Nets, graph: Arc<GraphCSR>, workers: usize) -> Result<S
     register_buffer_runtime(&mut *host, &mut extrinsics, input_buf, output_buf.clone());
 
     // Register graph FFI extrinsics
-    register_graph_extrinsics(&mut *host, &mut extrinsics, graph);
+    register_graph_extrinsics(&mut *host, &mut extrinsics, graph.clone());
+
+    // Algorithm selector extrinsic
+    {
+        let n32 = extrinsics.n32_ext_ty();
+        let algo_val = algorithm;
+        host.register_ext_fn(
+            "get_algorithm",
+            extrinsics.new_split_ext_fn(move |ivm, _dummy, out0, out1| {
+                ivm.link_wire(out0, Port::new_ext_val(n32.wrap_ext_val(algo_val)));
+                ivm.link_wire(out1, Port::ERASE);
+            }),
+        );
+    }
+
+    // Delta-stepping state + extrinsics (always registered — compiled nets reference all ext fns)
+    let ds = Arc::new(DeltaState::new(graph));
+    register_delta_extrinsics(&mut *host, &mut extrinsics, ds);
 
     host.insert_nets(nets);
 
@@ -411,6 +615,105 @@ fn register_graph_extrinsics<'ivm>(
                 };
                 let weight = g.adj_weight(node, idx);
                 ivm.link_wire(out, Port::new_ext_val(n32.wrap_ext_val(weight)));
+            }),
+        );
+    }
+}
+
+/// Register delta-stepping extrinsics backed by atomic state.
+fn register_delta_extrinsics<'ivm>(
+    host: &mut Host<'ivm>,
+    extrinsics: &mut Extrinsics<'ivm>,
+    ds: Arc<DeltaState>,
+) {
+    let n32 = extrinsics.n32_ext_ty();
+
+    // ds_next_batch: split — input: force_val → out0: batch_size, out1: erased
+    // The force input ensures previous batch relaxations completed before popping next.
+    {
+        let ds = ds.clone();
+        host.register_ext_fn(
+            "ds_next_batch",
+            extrinsics.new_split_ext_fn(move |ivm, _force, out0, out1| {
+                let size = ds.next_batch_size();
+                ivm.link_wire(out0, Port::new_ext_val(n32.wrap_ext_val(size)));
+                ivm.link_wire(out1, Port::ERASE);
+            }),
+        );
+    }
+
+    // ds_batch_vertex: split — input: index → out0: vertex, out1: erased
+    {
+        let ds = ds.clone();
+        host.register_ext_fn(
+            "ds_batch_vertex",
+            extrinsics.new_split_ext_fn(move |ivm, idx_val, out0, out1| {
+                let Some(idx) = n32.unwrap_ext_val(idx_val) else {
+                    ivm.flags.ext_generic = true;
+                    ivm.link_wire(out0, Port::ERASE);
+                    ivm.link_wire(out1, Port::ERASE);
+                    return;
+                };
+                let v = ds.batch_vertex(idx);
+                ivm.link_wire(out0, Port::new_ext_val(n32.wrap_ext_val(v)));
+                ivm.link_wire(out1, Port::ERASE);
+            }),
+        );
+    }
+
+    // ds_relax_vertex: split — input: vertex → out0: update_count, out1: erased
+    // Thread-safe: uses atomic CAS on dist/prev, Mutex on buckets.
+    {
+        let ds = ds.clone();
+        host.register_ext_fn(
+            "ds_relax_vertex",
+            extrinsics.new_split_ext_fn(move |ivm, u_val, out0, out1| {
+                let Some(u) = n32.unwrap_ext_val(u_val) else {
+                    ivm.flags.ext_generic = true;
+                    ivm.link_wire(out0, Port::ERASE);
+                    ivm.link_wire(out1, Port::ERASE);
+                    return;
+                };
+                let count = ds.relax_vertex(u);
+                ivm.link_wire(out0, Port::new_ext_val(n32.wrap_ext_val(count)));
+                ivm.link_wire(out1, Port::ERASE);
+            }),
+        );
+    }
+
+    // ds_get_dist: merge — input: (v, force) → output: dist[v]
+    // Merge ensures `force` (loop completion token) is reduced before reading.
+    {
+        let ds = ds.clone();
+        host.register_ext_fn(
+            "ds_get_dist",
+            extrinsics.new_merge_ext_fn(move |ivm, v_val, _force, out| {
+                let Some(v) = n32.unwrap_ext_val(v_val) else {
+                    ivm.flags.ext_generic = true;
+                    ivm.link_wire(out, Port::ERASE);
+                    return;
+                };
+                let d = ds.get_dist(v);
+                ivm.link_wire(out, Port::new_ext_val(n32.wrap_ext_val(d)));
+            }),
+        );
+    }
+
+    // ds_get_prev: split — input: v → out0: prev[v], out1: erased
+    {
+        let ds = ds.clone();
+        host.register_ext_fn(
+            "ds_get_prev",
+            extrinsics.new_split_ext_fn(move |ivm, v_val, out0, out1| {
+                let Some(v) = n32.unwrap_ext_val(v_val) else {
+                    ivm.flags.ext_generic = true;
+                    ivm.link_wire(out0, Port::ERASE);
+                    ivm.link_wire(out1, Port::ERASE);
+                    return;
+                };
+                let p = ds.get_prev(v);
+                ivm.link_wire(out0, Port::new_ext_val(n32.wrap_ext_val(p)));
+                ivm.link_wire(out1, Port::ERASE);
             }),
         );
     }

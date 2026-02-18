@@ -1,10 +1,26 @@
 // FFI-based pathfinding entry point.
 // Graph data injected via Rust extrinsics (no text parsing).
+// Algorithm selected at runtime via get_algorithm extrinsic.
 
 use #pathfind::dijkstra_ffi;
+use #pathfind::delta_stepping_ffi;
+
+// FFI: which algorithm to run (0=dijkstra, 1=delta_stepping)
+fn get_algorithm() -> N32 {
+  let d = 0;
+  safe inline_ivy! (d <- d) -> N32 {
+    a
+    d = @get_algorithm(a _)
+  }
+}
 
 pub fn main(&io: &IO) {
-  let (cost, path) = dijkstra_ffi::run();
+  let algo = get_algorithm();
+  let (cost, path) = if algo == 0 {
+    dijkstra_ffi::run()
+  } else {
+    delta_stepping_ffi::run()
+  };
   io.println("COST {cost}");
   if path.len() > 0 {
     let parts = path.map(fn* (n: N32) { "{n}" });

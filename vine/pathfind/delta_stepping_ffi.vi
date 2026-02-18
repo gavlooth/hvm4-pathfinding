@@ -1,0 +1,111 @@
+// Parallel delta-stepping using FFI-backed atomic state.
+// Rust manages dist/prev arrays with atomics + bucket queues.
+// Vine dispatches tree-parallel vertex relaxations to IVM workers.
+//
+// Key parallelism: within each bucket, vertex relaxations are independent.
+// par_relax builds a binary tree — IVM work-stealing distributes subtrees
+// across workers. Each leaf calls ds_relax_vertex (one FFI call per vertex).
+
+use dijkstra_ffi::{graph_source, graph_target};
+use graph::INF;
+
+// Delta-stepping FFI — atomic state managed in Rust
+// ds_next_batch: pops next batch of vertices from buckets.
+// Input `force` ensures previous batch is fully processed (data dependency).
+fn ds_next_batch(force: N32) -> N32 {
+  safe inline_ivy! (force <- force) -> N32 {
+    size
+    force = @ds_next_batch(size _)
+  }
+}
+
+// ds_batch_vertex: get vertex at index i in current batch.
+fn ds_batch_vertex(i: N32) -> N32 {
+  safe inline_ivy! (i <- i) -> N32 {
+    v
+    i = @ds_batch_vertex(v _)
+  }
+}
+
+// ds_relax_vertex: relax ALL neighbors of vertex u using atomic CAS.
+// Returns count of successful distance updates.
+fn ds_relax_vertex(u: N32) -> N32 {
+  safe inline_ivy! (u <- u) -> N32 {
+    count
+    u = @ds_relax_vertex(count _)
+  }
+}
+
+// ds_get_dist: read final dist[v]. Merge extrinsic — `force` input
+// ensures the main loop has completed before reading.
+fn ds_get_dist(v: N32, force: N32) -> N32 {
+  safe inline_ivy! (v <- v, force <- force) -> N32 {
+    d
+    v = @ds_get_dist(force d)
+  }
+}
+
+// ds_get_prev: read final prev[v] (predecessor on shortest path).
+fn ds_get_prev(v: N32) -> N32 {
+  safe inline_ivy! (v <- v) -> N32 {
+    p
+    v = @ds_get_prev(p _)
+  }
+}
+
+// Tree-parallel batch relaxation.
+// Splits [lo, hi) range into binary tree — IVM workers steal subtrees.
+// Each leaf: one ds_relax_vertex FFI call (independent, thread-safe via atomics).
+// The + combiner forces both subtrees to complete before returning.
+fn par_relax(lo: N32, hi: N32) -> N32 {
+  if hi - lo <= 1 {
+    ds_relax_vertex(ds_batch_vertex(lo))
+  } else {
+    let mid = (lo + hi) / 2;
+    par_relax(lo, mid) + par_relax(mid, hi)
+  }
+}
+
+// Main loop: process buckets until empty.
+// `force` token chains iterations — each ds_next_batch waits for
+// the previous par_relax to complete (via force input reduction).
+fn run_loop(force: N32) -> N32 {
+  let size = ds_next_batch(force);
+  if size == 0 {
+    0
+  } else {
+    let count = par_relax(0, size);
+    run_loop(count)
+  }
+}
+
+pub fn run() -> (N32, List[N32]) {
+  let source = graph_source();
+  let target = graph_target();
+
+  // Run delta-stepping — returns 0 when all buckets empty
+  let done = run_loop(0);
+
+  // Read final distance — merge extrinsic forces loop completion via `done`
+  let cost = ds_get_dist(target, done);
+
+  if cost == INF {
+    (INF, [])
+  } else {
+    (cost, reconstruct(source, target))
+  }
+}
+
+fn reconstruct(source: N32, target: N32) -> List[N32] {
+  let path = [target];
+  let cur = target;
+  while cur != source {
+    let p = ds_get_prev(cur);
+    if p == INF {
+      return [];
+    }
+    path.push_front(p);
+    cur = p;
+  }
+  path
+}
