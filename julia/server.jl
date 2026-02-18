@@ -9,9 +9,11 @@ Default port: 8080
 include("H3Grid.jl")
 include("ShipRouting.jl")
 include("VineRouting.jl")
+include("KwonSpeedLoss.jl")
 using .H3Grid
 using .ShipRouting
 using .VineRouting
+using .KwonSpeedLoss
 using HTTP
 using JSON3
 
@@ -26,13 +28,24 @@ mutable struct ServerState
     initialized::Bool
     h3_grid::Union{H3Grid.HexGrid, Nothing}
     vine::Union{VineRouting.VineState, Nothing}
-    # Cached CSR arrays for Vine FFI (built once from H3 grid)
+    ship::KwonSpeedLoss.ShipParams
+    cost_mode::Symbol  # :time, :fuel, :weighted, :safety
+    # Cached CSR topology (fixed) and weights (recomputed with weather)
     csr_row_ptr::Union{Vector{UInt32}, Nothing}
     csr_col_idx::Union{Vector{UInt32}, Nothing}
     csr_weights::Union{Vector{UInt32}, Nothing}
+    # Per-edge geometry (fixed, needed for weight recomputation)
+    csr_dist_m::Union{Vector{Float64}, Nothing}
+    csr_heading::Union{Vector{Float64}, Nothing}
+    csr_midpoints::Union{Vector{Tuple{Float64,Float64}}, Nothing}
 end
 
-const STATE = ServerState(nothing, nothing, UInt32(1000), false, nothing, nothing, nothing, nothing, nothing)
+const STATE = ServerState(
+    nothing, nothing, UInt32(1000), false, nothing, nothing,
+    KwonSpeedLoss.ShipParams(),  # default ship
+    :time,                       # default: minimize time
+    nothing, nothing, nothing, nothing, nothing, nothing
+)
 
 const GRID_CACHE = joinpath(@__DIR__, "data", "aegean_grid.txt")
 
@@ -204,32 +217,83 @@ function handle_route(req)
     ))
 end
 
-function build_csr_cache!(grid, scale)
+"""Build CSR topology + per-edge geometry (fixed). Weights computed separately."""
+function build_csr_cache!(grid)
     n = length(grid.cells)
-    # Count edges per node
     row_ptr = zeros(UInt32, n + 1)
     for (i, nbs) in enumerate(grid.neighbors)
         row_ptr[i + 1] = row_ptr[i] + UInt32(length(nbs))
     end
     total_edges = Int(row_ptr[end])
     col_idx = Vector{UInt32}(undef, total_edges)
-    weights = Vector{UInt32}(undef, total_edges)
+    dist_m = Vector{Float64}(undef, total_edges)
+    heading = Vector{Float64}(undef, total_edges)
+    midpoints = Vector{Tuple{Float64,Float64}}(undef, total_edges)
+
     idx = 1
     for (i, nbs) in enumerate(grid.neighbors)
         lat_i, lon_i = grid.centers[i]
         for j in nbs
             lat_j, lon_j = grid.centers[j]
             d = H3Grid._haversine_m(lat_i, lon_i, lat_j, lon_j)
-            w = max(UInt32(1), round(UInt32, d / 1000.0 * scale))
+            # Heading: bearing from i to j (degrees, 0=N, 90=E)
+            hdg = _bearing_deg(lat_i, lon_i, lat_j, lon_j)
             col_idx[idx] = UInt32(j - 1)  # 0-indexed
-            weights[idx] = w
+            dist_m[idx] = d
+            heading[idx] = hdg
+            midpoints[idx] = ((lat_i + lat_j) / 2.0, (lon_i + lon_j) / 2.0)
             idx += 1
         end
     end
     STATE.csr_row_ptr = row_ptr
     STATE.csr_col_idx = col_idx
+    STATE.csr_dist_m = dist_m
+    STATE.csr_heading = heading
+    STATE.csr_midpoints = midpoints
+    @info "CSR topology built: $n nodes, $total_edges edges"
+
+    # Initial weights: calm weather (distance-based, no weather penalty)
+    recompute_csr_weights!()
+end
+
+"""Bearing from (lat1,lon1) to (lat2,lon2) in degrees (0=N, 90=E)."""
+function _bearing_deg(lat1, lon1, lat2, lon2)
+    φ1 = deg2rad(lat1); φ2 = deg2rad(lat2)
+    Δλ = deg2rad(lon2 - lon1)
+    x = sin(Δλ) * cos(φ2)
+    y = cos(φ1) * sin(φ2) - sin(φ1) * cos(φ2) * cos(Δλ)
+    θ = atan(x, y)
+    return mod(rad2deg(θ), 360.0)
+end
+
+"""
+Recompute CSR edge weights using the Kwon model + current weather.
+If no weather is set, uses calm conditions (BN=0, no speed loss).
+Call this whenever weather forecast changes.
+"""
+function recompute_csr_weights!(; wind_speed_ms=0.0, wind_dir_deg=0.0,
+                                  current_speed_ms=0.0, current_dir_deg=0.0,
+                                  weather_grid=nothing)
+    dist_m = STATE.csr_dist_m
+    hdg = STATE.csr_heading
+    ship = STATE.ship
+    scale = Int(STATE.scale)
+    mode = STATE.cost_mode
+    n_edges = length(dist_m)
+    weights = Vector{UInt32}(undef, n_edges)
+
+    for i in 1:n_edges
+        # Per-edge weather: sample from grid if available, else uniform
+        ws, wd, cs, cd = wind_speed_ms, wind_dir_deg, current_speed_ms, current_dir_deg
+        # TODO: if weather_grid !== nothing, sample at midpoints[i]
+
+        weights[i] = KwonSpeedLoss.kwon_edge_cost(
+            ship, dist_m[i], hdg[i], ws, wd, cs, cd;
+            mode=mode, scale=scale
+        )
+    end
     STATE.csr_weights = weights
-    @info "CSR cache built: $n nodes, $total_edges edges"
+    @info "CSR weights recomputed: $(n_edges) edges, mode=$(mode)"
 end
 
 function handle_vine_route(req)
@@ -254,9 +318,9 @@ function handle_vine_route(req)
         @info "Vine IVM ready."
     end
 
-    # Build CSR cache lazily
+    # Build CSR topology + weights lazily
     if STATE.csr_row_ptr === nothing
-        build_csr_cache!(grid, Int(STATE.scale))
+        build_csr_cache!(grid)
     end
 
     # Get origin/destination
