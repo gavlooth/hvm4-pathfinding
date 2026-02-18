@@ -346,14 +346,14 @@ function route_handler(req)
         elseif method == "GET" && target == "/api/state"
             return handle_state(req)
         elseif method == "GET" && (target == "/" || target == "/map")
-            mapfile = joinpath(@__DIR__, "..", "frontend", "public", "map.html")
-            if isfile(mapfile)
-                return HTTP.Response(200, ["Content-Type" => "text/html"], read(mapfile, String))
+            indexfile = joinpath(@__DIR__, "..", "frontend", "public", "index.html")
+            if isfile(indexfile)
+                return HTTP.Response(200, ["Content-Type" => "text/html"], read(indexfile, String))
             else
                 return HTTP.Response(200, ["Content-Type" => "text/html"],
                     """<!DOCTYPE html><html><body style="font-family:sans-serif;background:#1a1a2e;color:#eee;padding:40px">
                     <h1 style="color:#4fc3f7">Maritime Router API</h1>
-                    <p>map.html not found. <a href="/api/state" style="color:#4fc3f7">API state</a></p>
+                    <p>index.html not found. <a href="/api/state" style="color:#4fc3f7">API state</a></p>
                     </body></html>""")
             end
         else

@@ -32,10 +32,11 @@ lib/test_gen
 # Rust build artifacts
 bridge/target/
 
-# Frontend build artifacts
-frontend/.shadow-cljs/
-frontend/public/js/
-frontend/node_modules/
+# Test/bench binaries
+bridge/test_*
+bridge/bench_*
+!bridge/test_*.c
+!bridge/bench_*.c
 
 # Weather binary / data
 weather
