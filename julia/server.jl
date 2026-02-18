@@ -8,8 +8,10 @@ Default port: 8080
 
 include("H3Grid.jl")
 include("ShipRouting.jl")
+include("VineRouting.jl")
 using .H3Grid
 using .ShipRouting
+using .VineRouting
 using HTTP
 using JSON3
 
@@ -23,9 +25,14 @@ mutable struct ServerState
     scale::UInt32
     initialized::Bool
     h3_grid::Union{H3Grid.HexGrid, Nothing}
+    vine::Union{VineRouting.VineState, Nothing}
+    # Cached CSR arrays for Vine FFI (built once from H3 grid)
+    csr_row_ptr::Union{Vector{UInt32}, Nothing}
+    csr_col_idx::Union{Vector{UInt32}, Nothing}
+    csr_weights::Union{Vector{UInt32}, Nothing}
 end
 
-const STATE = ServerState(nothing, nothing, UInt32(1000), false, nothing)
+const STATE = ServerState(nothing, nothing, UInt32(1000), false, nothing, nothing, nothing, nothing, nothing)
 
 const GRID_CACHE = joinpath(@__DIR__, "data", "aegean_grid.txt")
 
@@ -181,7 +188,7 @@ end
 function handle_route(req)
     STATE.initialized || return error_response("not initialized")
     body = parse_body(req)
-    alg_idx = Int(get(body, :algorithm, 2))
+    alg_idx = Int(get(body, :algorithm, 0))
     alg = Algorithm(alg_idx)
 
     STATE.result = route(STATE.routing, algorithm=alg)
@@ -194,6 +201,106 @@ function handle_route(req)
         :cost_real => Float64(c) / Float64(STATE.scale),
         :path_length => pl,
         :waypoints => [wp_to_dict(wp) for wp in wps],
+    ))
+end
+
+function build_csr_cache!(grid, scale)
+    n = length(grid.cells)
+    # Count edges per node
+    row_ptr = zeros(UInt32, n + 1)
+    for (i, nbs) in enumerate(grid.neighbors)
+        row_ptr[i + 1] = row_ptr[i] + UInt32(length(nbs))
+    end
+    total_edges = Int(row_ptr[end])
+    col_idx = Vector{UInt32}(undef, total_edges)
+    weights = Vector{UInt32}(undef, total_edges)
+    idx = 1
+    for (i, nbs) in enumerate(grid.neighbors)
+        lat_i, lon_i = grid.centers[i]
+        for j in nbs
+            lat_j, lon_j = grid.centers[j]
+            d = H3Grid._haversine_m(lat_i, lon_i, lat_j, lon_j)
+            w = max(UInt32(1), round(UInt32, d / 1000.0 * scale))
+            col_idx[idx] = UInt32(j - 1)  # 0-indexed
+            weights[idx] = w
+            idx += 1
+        end
+    end
+    STATE.csr_row_ptr = row_ptr
+    STATE.csr_col_idx = col_idx
+    STATE.csr_weights = weights
+    @info "CSR cache built: $n nodes, $total_edges edges"
+end
+
+function handle_vine_route(req)
+    STATE.initialized || return error_response("not initialized")
+    body = parse_body(req)
+    algo = String(get(body, :algorithm, "dijkstra"))
+    workers = Int(get(body, :workers, 4))
+
+    grid = STATE.h3_grid
+    if grid === nothing
+        return error_response("H3 grid not loaded — Vine routing requires H3 mode")
+    end
+
+    # Initialize Vine FFI state lazily
+    if STATE.vine === nothing
+        @info "Initializing Vine IVM (FFI mode)..."
+        try
+            STATE.vine = VineRouting.vine_init_ffi()
+        catch e
+            return error_response("Vine init failed: $(sprint(showerror, e))"; status=500)
+        end
+        @info "Vine IVM ready."
+    end
+
+    # Build CSR cache lazily
+    if STATE.csr_row_ptr === nothing
+        build_csr_cache!(grid, Int(STATE.scale))
+    end
+
+    # Get origin/destination
+    if !haskey(body, :origin) || !haskey(body, :destination)
+        return error_response("Vine route requires 'origin' and 'destination' in request body")
+    end
+    origin = body[:origin]
+    destination = body[:destination]
+    src_idx = H3Grid.find_nearest(grid, Float64(origin[1]), Float64(origin[2]))
+    tgt_idx = H3Grid.find_nearest(grid, Float64(destination[1]), Float64(destination[2]))
+    src_node = src_idx - 1  # 0-indexed for Vine
+    tgt_node = tgt_idx - 1
+
+    t0 = time()
+    output = VineRouting.vine_route_graph(
+        STATE.vine,
+        STATE.csr_row_ptr, STATE.csr_col_idx, STATE.csr_weights,
+        Int(src_node), Int(tgt_node);
+        workers=workers)
+    elapsed = time() - t0
+
+    result = VineRouting.parse_route_output(output)
+
+    # Convert path node IDs back to lat/lon waypoints
+    scale = Int(STATE.scale)
+    wps = Dict{Symbol, Any}[]
+    for nid in result.path
+        lat, lon = grid.centers[nid + 1]  # 1-indexed in Julia
+        push!(wps, Dict(
+            :lat => lat, :lon => lon,
+            :eta_hours => 0.0, :speed_knots => 0.0,
+            :wave_height => 0.0, :wind_speed => 0.0,
+            :heading_deg => 0.0, :node_id => UInt32(nid),
+        ))
+    end
+
+    json_response(Dict(
+        :cost => result.cost,
+        :cost_real => Float64(result.cost) / Float64(scale),
+        :path_length => length(result.path),
+        :waypoints => wps,
+        :elapsed_ms => round(elapsed * 1000, digits=1),
+        :algorithm => algo,
+        :engine => "vine",
     ))
 end
 
@@ -231,6 +338,8 @@ function route_handler(req)
             return handle_weather_clear(req)
         elseif method == "POST" && target == "/api/route"
             return handle_route(req)
+        elseif method == "POST" && target == "/api/vine/route"
+            return handle_vine_route(req)
         elseif method == "GET" && target == "/api/state"
             return handle_state(req)
         elseif method == "GET" && (target == "/" || target == "/map")
@@ -271,6 +380,7 @@ function main()
     println("  POST /api/weather       — push weather grid")
     println("  POST /api/weather/clear — clear weather grids")
     println("  POST /api/route         — compute route (Dijkstra)")
+    println("  POST /api/vine/route    — compute route (Vine IVM)")
     println("  GET  /api/state         — server state")
 
     HTTP.serve(route_handler, "0.0.0.0", port)

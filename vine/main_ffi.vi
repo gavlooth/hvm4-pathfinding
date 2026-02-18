@@ -1,0 +1,15 @@
+// FFI-based pathfinding entry point.
+// Graph data injected via Rust extrinsics (no text parsing).
+
+use #pathfind::dijkstra_ffi;
+
+pub fn main(&io: &IO) {
+  let (cost, path) = dijkstra_ffi::run();
+  io.println("COST {cost}");
+  if path.len() > 0 {
+    let parts = path.map(fn* (n: N32) { "{n}" });
+    io.println("PATH {parts.join(" ")}");
+  } else {
+    io.println("PATH");
+  }
+}

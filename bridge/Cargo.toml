@@ -1,0 +1,13 @@
+[package]
+name = "vine-pathfind"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vine = { git = "https://github.com/VineLang/vine", rev = "d81b1dd" }
+ivy = { git = "https://github.com/VineLang/vine", rev = "d81b1dd" }
+ivm = { git = "https://github.com/VineLang/vine", rev = "d81b1dd" }
+vine-util = { git = "https://github.com/VineLang/vine", rev = "d81b1dd" }

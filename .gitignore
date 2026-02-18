@@ -29,6 +29,9 @@ lib/test_gen
 # IDE / local
 .claude/settings.local.json
 
+# Rust build artifacts
+bridge/target/
+
 # Frontend build artifacts
 frontend/.shadow-cljs/
 frontend/public/js/

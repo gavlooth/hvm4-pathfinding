@@ -1,0 +1,120 @@
+// Dijkstra's algorithm using FFI graph access.
+// Graph data served from Rust CSR arrays — O(1) adjacency queries.
+// Neighbor lists built from FFI, then iterated like standard Dijkstra.
+
+use #root::data::{Array, Map};
+use graph::{Edge, INF};
+
+// FFI extrinsics — graph data from Rust CSR arrays
+pub fn graph_nodes() -> N32 {
+  let d = 0;
+  safe inline_ivy! (d <- d) -> N32 {
+    n
+    d = @graph_nodes(n _)
+  }
+}
+
+pub fn graph_source() -> N32 {
+  let d = 0;
+  safe inline_ivy! (d <- d) -> N32 {
+    s
+    d = @graph_source(s _)
+  }
+}
+
+pub fn graph_target() -> N32 {
+  let d = 0;
+  safe inline_ivy! (d <- d) -> N32 {
+    t
+    d = @graph_target(t _)
+  }
+}
+
+pub fn graph_degree(node: N32) -> N32 {
+  safe inline_ivy! (node <- node) -> N32 {
+    deg
+    node = @graph_degree(deg _)
+  }
+}
+
+pub fn graph_adj_target(node: N32, idx: N32) -> N32 {
+  safe inline_ivy! (node <- node, idx <- idx) -> N32 {
+    target
+    node = @graph_adj_target(idx target)
+  }
+}
+
+pub fn graph_adj_weight(node: N32, idx: N32) -> N32 {
+  safe inline_ivy! (node <- node, idx <- idx) -> N32 {
+    weight
+    node = @graph_adj_weight(idx weight)
+  }
+}
+
+// Build neighbor list from FFI index queries
+fn neighbors(u: N32, deg: N32, i: N32) -> List[Edge] {
+  if i >= deg {
+    []
+  } else {
+    let v = graph_adj_target(u, i);
+    let w = graph_adj_weight(u, i);
+    let rest = neighbors(u, deg, i + 1);
+    rest.push_front(Edge(v, w));
+    rest
+  }
+}
+
+pub fn run() -> (N32, List[N32]) {
+  let n = graph_nodes();
+  let source = graph_source();
+  let target = graph_target();
+
+  let dist = Array::new(n, INF);
+  let prev = Array::new(n, INF);
+  *dist.at(source).assume() = 0;
+
+  let pq = Map::empty[N32, _];
+  pq.insert(0, [source]);
+
+  while pq.remove_min() is Some(d, batch) {
+    for u in batch.iter() {
+      if d > *dist.at(u).assume() {
+        continue;
+      }
+      if u == target {
+        return (d, reconstruct(prev, source, target));
+      }
+      let deg = graph_degree(u);
+      let nbs = neighbors(u, deg, 0);
+      for Edge(v, w) in nbs {
+        let nd = d + w;
+        if nd < *dist.at(v).assume() {
+          *dist.at(v).assume() = nd;
+          *prev.at(v).assume() = u;
+          (*pq.at_or_insert(nd, [])).push_back(v);
+        }
+      }
+    }
+  }
+
+  let cost = *dist.at(target).assume();
+  if cost == INF {
+    (INF, [])
+  } else {
+    (cost, reconstruct(prev, source, target))
+  }
+}
+
+fn reconstruct(prev: Array[N32], source: N32, target: N32) -> List[N32] {
+  let path = [target];
+  let cur = target;
+  while cur != source {
+    let p = *prev.at(cur).assume();
+    if p == INF {
+      return [];
+    }
+    path.push_front(p);
+    cur = p;
+  }
+  path
+}

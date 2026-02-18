@@ -1,0 +1,87 @@
+use #root::data::Array;
+
+pub const INF: N32 = 999999;
+
+pub struct* Edge(pub (N32, N32));
+
+pub struct? Graph(pub (N32, Array[List[Edge]]));
+
+pub mod Graph {
+  pub fn new(n: N32) -> Graph {
+    Graph(n, Array::from_fn(n, fn* () { [] }))
+  }
+
+  pub fn .add_edge(&Graph(_n, adj), from: N32, to: N32, weight: N32) {
+    (*adj.at(from).assume()).push_back(Edge(to, weight));
+  }
+
+  pub fn .add_biedge(&self: &Graph, a: N32, b: N32, weight: N32) {
+    self.add_edge(a, b, weight);
+    self.add_edge(b, a, weight);
+  }
+}
+
+pub struct* PathResult(pub (List[N32], N32));
+
+pub fn reconstruct_path(prev: Array[N32], source: N32, target: N32) -> List[N32] {
+  let path = [target];
+  let cur = target;
+  while cur != source {
+    let p = *prev.at(cur).assume();
+    if p == INF {
+      return [];
+    }
+    path.push_front(p);
+    cur = p;
+  }
+  path
+}
+
+pub fn parse_input(&io: &IO) -> (String, Graph, N32, N32) {
+  let algo = "";
+  let source: N32 = 0;
+  let target: N32 = 0;
+  let graph = Graph::new(0);
+  let phase = 0;
+
+  while io.read_line() is Some(line) {
+    when {
+      line.starts_with(&"ALGO ") {
+        algo = line.split_at(5).1;
+      }
+      line.starts_with(&"NODES ") {
+        let n = N32::parse(line.split_at(6).1).assume();
+        graph = Graph::new(n);
+      }
+      line.starts_with(&"EDGES ") {
+        phase = 1;
+      }
+      line.starts_with(&"SOURCE ") {
+        source = N32::parse(line.split_at(7).1).assume();
+      }
+      line.starts_with(&"TARGET ") {
+        target = N32::parse(line.split_at(7).1).assume();
+      }
+      phase == 1 and !(line.starts_with(&"SOURCE") or line.starts_with(&"TARGET")) {
+        let parts = line.split(" ");
+        let from = N32::parse(parts.pop_front().assume()).assume();
+        let to = N32::parse(parts.pop_front().assume()).assume();
+        let weight = N32::parse(parts.pop_front().assume()).assume();
+        graph.add_edge(from, to, weight);
+      }
+    }
+  }
+
+  (algo, graph, source, target)
+}
+
+pub fn print_result(&io: &IO, result: PathResult) {
+  let PathResult(path, cost) = result;
+  io.println("COST {cost}");
+  if path.len() > 0 {
+    let parts = path.map(fn* (n: N32) { "{n}" });
+    io.println("PATH {parts.join(" ")}");
+  } else {
+    io.println("PATH");
+  }
+}

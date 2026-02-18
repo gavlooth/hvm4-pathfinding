@@ -67,13 +67,19 @@
       </select>
       <label>Algorithm</label>
       <select id="algo" disabled>
-        <option value="2" selected>Dijkstra</option>
+        <option value="c3_dijkstra" selected>Dijkstra (C3)</option>
+        <option value="vine_dijkstra">Dijkstra (Vine)</option>
+        <option value="vine_delta_stepping">Delta-Stepping (Vine)</option>
+        <option value="vine_bfs">BFS (Vine)</option>
+        <option value="vine_bellman_ford">Bellman-Ford (Vine)</option>
       </select>
-      <label>Smoothing (Douglas-Peucker)</label>
-      <div class="timeout-row">
-        <input type="range" id="epsilon" min="0" max="0.05" step="0.001" value="0.005" style="width:120px;cursor:pointer" oninput="updateEpsLabel()">
-        <span id="eps-label">0.005&deg;</span>
-      </div>
+      <label>Smoothing</label>
+      <select id="smoothing" onchange="onSmoothingChange()">
+        <option value="none">None (raw waypoints)</option>
+        <option value="chaikin" selected>Chaikin corner cutting</option>
+        <option value="bezier">Cubic B&eacute;zier spline</option>
+        <option value="heading">Heading-rate limiting</option>
+      </select>
       <label>Timeout</label>
       <div class="timeout-row">
         <input type="number" id="timeout" value="30" min="5" max="300" step="5">
@@ -97,13 +103,14 @@ let elapsedTimer = null;
 let bgLine = null;
 
 const ALGO_INFO = {
-  2: { name: 'Dijkstra', desc: 'Classic shortest-path with Fibonacci heap.' },
+  'c3_dijkstra': { name: 'Dijkstra (C3)', desc: 'Fibonacci heap Dijkstra in C3.' },
+  'vine_dijkstra': { name: 'Dijkstra (Vine)', desc: 'Map-based Dijkstra on IVM runtime.' },
+  'vine_delta_stepping': { name: 'Delta-Stepping (Vine)', desc: 'Parallel bucket SSSP on IVM.' },
+  'vine_bfs': { name: 'BFS (Vine)', desc: 'Level-synchronous BFS (unweighted) on IVM.' },
+  'vine_bellman_ford': { name: 'Bellman-Ford (Vine)', desc: 'Edge relaxation with early termination on IVM.' },
 };
 
-function updateEpsLabel() {
-  const v = parseFloat(document.getElementById('epsilon').value);
-  document.getElementById('eps-label').textContent = v === 0 ? 'off' : v.toFixed(3) + '\u00b0';
-  // Re-display if we have a cached route
+function onSmoothingChange() {
   if (lastRoute) {
     displayRoute(lastRoute);
     updateInfo(lastRoute, lastAlg, lastMs);
@@ -179,7 +186,10 @@ async function runPipeline() {
 
   abortCtrl = new AbortController();
   const signal = abortCtrl.signal;
-  const timeoutSec = parseInt(document.getElementById('timeout').value) || 30;
+  const alg = document.getElementById('algo').value;
+  const isVine = alg.startsWith('vine_');
+  const userTimeout = parseInt(document.getElementById('timeout').value) || 30;
+  const timeoutSec = isVine ? Math.max(userTimeout, 120) : userTimeout;
 
   // Auto-abort after timeout
   const timeoutId = setTimeout(() => {
@@ -192,8 +202,6 @@ async function runPipeline() {
   try {
     const sel = document.getElementById('route-select').value.split(',').map(Number);
     const origin = [sel[0], sel[1]], dest = [sel[2], sel[3]];
-    const alg = 2;
-
     // 1. Init
     log('Initializing with H3 graph...');
     const t0 = performance.now();
@@ -205,27 +213,37 @@ async function runPipeline() {
     log(`Voyage: ${routeName}`);
     await post('/api/voyage', { origin, destination: dest }, signal);
 
-    // 3. Weather
-    const n = 25;
-    const wxBase = {
-      sw: [34.5, 19.0], ne: [41.5, 30.0], rows: 5, cols: 5,
-      wind_speed: Array(n).fill(3), wind_dir: Array(n).fill(180),
-      wave_height: Array(n).fill(0.5), wave_dir: Array(n).fill(180),
-      current_speed: Array(n).fill(0.2), current_dir: Array(n).fill(90),
-    };
-    await post('/api/weather', { ...wxBase, timestamp: 0 }, signal);
-    log('Weather pushed', 'ok');
+    // 3. Weather (only for C3 algorithms)
+    if (!isVine) {
+      const n = 25;
+      const wxBase = {
+        sw: [34.5, 19.0], ne: [41.5, 30.0], rows: 5, cols: 5,
+        wind_speed: Array(n).fill(3), wind_dir: Array(n).fill(180),
+        wave_height: Array(n).fill(0.5), wave_dir: Array(n).fill(180),
+        current_speed: Array(n).fill(0.2), current_dir: Array(n).fill(90),
+      };
+      await post('/api/weather', { ...wxBase, timestamp: 0 }, signal);
+      log('Weather pushed', 'ok');
+    }
 
-    // 4. Route (this is the slow part — start elapsed timer)
-    const algName = ALGO_INFO[alg]?.name || `Alg ${alg}`;
-    log(`Routing with ${algName}... (timeout: ${timeoutSec}s)`);
+    // 4. Route
+    const algName = ALGO_INFO[alg]?.name || alg;
+    log(`Routing with ${algName}... (timeout: ${timeoutSec}s)${isVine ? ' [IVM]' : ''}`);
     startElapsed();
     const t1 = performance.now();
-    const route = await post('/api/route', { algorithm: alg }, signal);
+
+    let route;
+    if (isVine) {
+      const vineAlgo = alg.replace('vine_', '');
+      route = await post('/api/vine/route', { algorithm: vineAlgo, workers: 4, origin, destination: dest }, signal);
+    } else {
+      route = await post('/api/route', { algorithm: 0 }, signal);
+    }
     stopElapsed();
     const ms = (performance.now()-t1)|0;
     document.getElementById('elapsed').textContent = `${(ms/1000).toFixed(1)}s`;
-    log(`Route: cost=${route.cost} (${route.cost_real.toFixed(1)} h), ${route.path_length} wp, ${ms} ms`, 'ok');
+    const costUnit = route.engine === 'vine' ? 'km' : 'h';
+    log(`Route: cost=${route.cost} (${route.cost_real.toFixed(1)} ${costUnit}), ${route.path_length} wp, ${ms} ms`, 'ok');
 
     lastRoute = route;
     lastAlg = algName;
@@ -255,21 +273,23 @@ function displayRoute(route) {
   markers = [];
   bgLine = null;
 
-  const rawWps = route.waypoints;
-  if (!rawWps || !rawWps.length) return;
+  const wps = route.waypoints;
+  if (!wps || !wps.length) return;
 
-  const epsilon = parseFloat(document.getElementById('epsilon').value) || 0;
-  const wps = epsilon > 0 ? simplifyRoute(rawWps, epsilon) : rawWps;
+  const method = document.getElementById('smoothing').value;
+  const rawLatLngs = wps.map(w => [w.lat, w.lon]);
+  const smoothed = smoothRoute(rawLatLngs, method);
+  const isSmoothed = method !== 'none';
 
-  // Draw full-resolution route as faint background line
-  if (epsilon > 0 && rawWps.length > wps.length) {
-    const allLatLngs = rawWps.map(w => [w.lat, w.lon]);
-    bgLine = L.polyline(allLatLngs, { color: '#4fc3f7', weight: 1, opacity: 0.25, dashArray: '4,4' }).addTo(map);
+  // Draw raw route as faint background when smoothing is active
+  if (isSmoothed) {
+    bgLine = L.polyline(rawLatLngs, { color: '#4fc3f7', weight: 1, opacity: 0.25, dashArray: '4,4' }).addTo(map);
   }
 
-  const latlngs = wps.map(w => [w.lat, w.lon]);
-  routeLine = L.polyline(latlngs, { color: '#e94560', weight: 3, opacity: 0.9, smoothFactor: 1 }).addTo(map);
+  // Draw smoothed (or raw) route
+  routeLine = L.polyline(smoothed, { color: '#e94560', weight: 3, opacity: 0.9, smoothFactor: 1 }).addTo(map);
 
+  // Markers always on original waypoints
   wps.forEach((wp, i) => {
     const isEnd = (i === 0 || i === wps.length - 1);
     const m = L.circleMarker([wp.lat, wp.lon], {
@@ -292,24 +312,22 @@ function displayRoute(route) {
 }
 
 function updateInfo(route, alg, ms) {
-  const rawWps = route.waypoints;
-  const epsilon = parseFloat(document.getElementById('epsilon').value) || 0;
-  const wps = epsilon > 0 ? simplifyRoute(rawWps, epsilon) : rawWps;
+  const wps = route.waypoints;
 
   let totalDist = 0;
   for (let i = 1; i < wps.length; i++) {
     totalDist += haversineNm(wps[i-1].lat, wps[i-1].lon, wps[i].lat, wps[i].lon);
   }
-  const wpLabel = epsilon > 0 && wps.length < rawWps.length
-    ? `${wps.length} (simplified from ${rawWps.length})`
-    : `${rawWps.length}`;
+
+  const method = document.getElementById('smoothing').value;
+  const smoothLabel = method === 'none' ? '' : ` + ${method}`;
 
   document.getElementById('info').innerHTML =
     `<b>Algorithm:</b> ${alg} (${ms} ms)<br>` +
-    `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} hours)<br>` +
-    `<b>Waypoints:</b> ${wpLabel}<br>` +
+    `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} ${route.engine === 'vine' ? 'km' : 'hours'})<br>` +
+    `<b>Waypoints:</b> ${wps.length}${smoothLabel}<br>` +
     `<b>Distance:</b> ~${totalDist.toFixed(1)} nm<br>` +
-    `<b>ETA:</b> ${rawWps[rawWps.length-1].eta_hours.toFixed(1)} hours`;
+    `<b>ETA:</b> ${wps[wps.length-1].eta_hours.toFixed(1)} hours`;
 
   let html = '<table><tr><th>#</th><th>Lat</th><th>Lon</th><th>ETA</th><th>Speed</th><th>Wave</th><th>Wind</th><th>Hdg</th><th>Node</th></tr>';
   wps.forEach((wp, i) => {
@@ -323,39 +341,225 @@ function updateInfo(route, alg, ms) {
   document.getElementById('wp-table').innerHTML = html;
 }
 
-// --- Douglas-Peucker simplification ---
-function perpDist(p, a, b) {
-  // Perpendicular distance from point p to line segment a-b (in degrees, approximate)
+// ============================================================
+// Smoothing algorithms
+// ============================================================
+
+function smoothRoute(pts, method) {
+  if (pts.length < 3 || method === 'none') return pts;
+  switch (method) {
+    case 'chaikin':  return chaikinSmooth(pts, 3);
+    case 'bezier':   return catmullRomSpline(pts, 8, 0.5);
+    case 'heading':  return headingRateSmooth(pts, 15);
+    default:         return pts;
+  }
+}
+
+// --- Chaikin corner cutting (land-constrained) ---
+// Each iteration replaces interior segments with 25%/75% splits.
+// After smoothing, each point is clamped so it cannot deviate more
+// than maxDev from the nearest segment of the original polyline.
+function chaikinSmooth(pts, iterations, maxDev) {
+  if (maxDev === undefined) maxDev = 0.015;
+  let points = pts.slice();
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = [points[0]];
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i], b = points[i + 1];
+      if (i === 0) {
+        next.push(a);
+        next.push([0.5 * a[0] + 0.5 * b[0], 0.5 * a[1] + 0.5 * b[1]]);
+      } else if (i === points.length - 2) {
+        next.push([0.5 * a[0] + 0.5 * b[0], 0.5 * a[1] + 0.5 * b[1]]);
+        next.push(b);
+      } else {
+        next.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+        next.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+      }
+    }
+    next.push(points[points.length - 1]);
+    points = next;
+  }
+  // Clamp: pull back any point that drifts too far from the original polyline
+  return clampToPolyline(points, pts, maxDev);
+}
+
+// --- Catmull-Rom cubic spline (land-constrained) ---
+// Passes through all original waypoints with smooth C1 continuity.
+// Per-segment deviation is clamped so the spline cannot swing far
+// from the original polyline (prevents cutting through islands).
+// maxDev: absolute max deviation in degrees (~0.015 deg ≈ 1.7 km).
+// Also capped at 20% of chord length so short coastal hops stay tight.
+function catmullRomSpline(pts, samplesPerSeg, tension, maxDev) {
+  if (maxDev === undefined) maxDev = 0.015;
+  const n = pts.length;
+  if (n < 2) return pts;
+  const result = [];
+
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(n - 1, i + 2)];
+
+    const chordLen = Math.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2);
+    const segMaxDev = Math.min(maxDev, chordLen * 0.2);
+
+    // Binary search for safe tension: start at full, halve until deviation fits
+    let safeTension = tension;
+    let segPoints = null;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      segPoints = hermiteSegment(p0, p1, p2, p3, safeTension, samplesPerSeg);
+      const dev = maxChordDeviation(segPoints, p1, p2);
+      if (dev <= segMaxDev || safeTension < 0.01) break;
+      safeTension *= 0.5;
+    }
+
+    // Append segment points (excluding last to avoid duplicates)
+    for (let s = 0; s < segPoints.length - 1; s++) {
+      result.push(segPoints[s]);
+    }
+  }
+  result.push(pts[n - 1]);
+  return result;
+}
+
+// Generate Hermite spline points for one segment
+function hermiteSegment(p0, p1, p2, p3, t, steps) {
+  const m1lat = t * (p2[0] - p0[0]);
+  const m1lon = t * (p2[1] - p0[1]);
+  const m2lat = t * (p3[0] - p1[0]);
+  const m2lon = t * (p3[1] - p1[1]);
+  const pts = [];
+  for (let s = 0; s <= steps; s++) {
+    const u = s / steps;
+    const u2 = u * u, u3 = u2 * u;
+    const h00 = 2*u3 - 3*u2 + 1;
+    const h10 = u3 - 2*u2 + u;
+    const h01 = -2*u3 + 3*u2;
+    const h11 = u3 - u2;
+    pts.push([
+      h00*p1[0] + h10*m1lat + h01*p2[0] + h11*m2lat,
+      h00*p1[1] + h10*m1lon + h01*p2[1] + h11*m2lon,
+    ]);
+  }
+  return pts;
+}
+
+// Max perpendicular distance from any point in pts to the chord a-b
+function maxChordDeviation(pts, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   const len2 = dx*dx + dy*dy;
-  if (len2 === 0) return Math.sqrt((p[0]-a[0])**2 + (p[1]-a[1])**2);
-  let t = ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  const proj = [a[0] + t*dx, a[1] + t*dy];
-  return Math.sqrt((p[0]-proj[0])**2 + (p[1]-proj[1])**2);
+  let maxD = 0;
+  for (const p of pts) {
+    let d;
+    if (len2 < 1e-18) {
+      d = Math.sqrt((p[0]-a[0])**2 + (p[1]-a[1])**2);
+    } else {
+      const t = Math.max(0, Math.min(1, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / len2));
+      const proj = [a[0] + t*dx, a[1] + t*dy];
+      d = Math.sqrt((p[0]-proj[0])**2 + (p[1]-proj[1])**2);
+    }
+    if (d > maxD) maxD = d;
+  }
+  return maxD;
 }
 
-function douglasPeucker(points, epsilon) {
-  if (points.length <= 2) return points;
-  let maxDist = 0, maxIdx = 0;
-  const first = points[0], last = points[points.length - 1];
-  for (let i = 1; i < points.length - 1; i++) {
-    const d = perpDist(points[i], first, last);
-    if (d > maxDist) { maxDist = d; maxIdx = i; }
+// --- Heading-rate smoothing (land-constrained) ---
+// Maritime-specific: limits the rate of heading change per step.
+// Sharp turns are replaced with smooth arcs using quadratic Bezier
+// interpolation around the corner waypoint. Final result clamped
+// to stay near the original polyline.
+function headingRateSmooth(pts, maxTurnDeg, maxDev) {
+  if (maxDev === undefined) maxDev = 0.015;
+  const n = pts.length;
+  if (n < 3) return pts;
+  const result = [pts[0]];
+
+  for (let i = 1; i < n - 1; i++) {
+    const prev = pts[i - 1];
+    const curr = pts[i];
+    const next = pts[i + 1];
+
+    const hdg1 = bearing(prev, curr);
+    const hdg2 = bearing(curr, next);
+    let turn = hdg2 - hdg1;
+    while (turn > 180) turn -= 360;
+    while (turn < -180) turn += 360;
+
+    if (Math.abs(turn) <= maxTurnDeg) {
+      result.push(curr);
+    } else {
+      const nSteps = Math.max(3, Math.ceil(Math.abs(turn) / maxTurnDeg));
+      const pullback = 0.3;
+      const dPrev = Math.sqrt((curr[0]-prev[0])**2 + (curr[1]-prev[1])**2);
+      const dNext = Math.sqrt((next[0]-curr[0])**2 + (next[1]-curr[1])**2);
+      const rPrev = Math.min(pullback, 0.5 * dPrev / Math.max(dPrev, 1e-9));
+      const rNext = Math.min(pullback, 0.5 * dNext / Math.max(dNext, 1e-9));
+      const arcStart = [
+        curr[0] - rPrev * (curr[0] - prev[0]),
+        curr[1] - rPrev * (curr[1] - prev[1]),
+      ];
+      const arcEnd = [
+        curr[0] + rNext * (next[0] - curr[0]),
+        curr[1] + rNext * (next[1] - curr[1]),
+      ];
+      result.push(arcStart);
+      for (let s = 1; s < nSteps; s++) {
+        const t = s / nSteps;
+        const omt = 1 - t;
+        result.push([
+          omt*omt*arcStart[0] + 2*omt*t*curr[0] + t*t*arcEnd[0],
+          omt*omt*arcStart[1] + 2*omt*t*curr[1] + t*t*arcEnd[1],
+        ]);
+      }
+      result.push(arcEnd);
+    }
   }
-  if (maxDist > epsilon) {
-    const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
-    const right = douglasPeucker(points.slice(maxIdx), epsilon);
-    return left.slice(0, -1).concat(right);
-  }
-  return [first, last];
+  result.push(pts[n - 1]);
+  return clampToPolyline(result, pts, maxDev);
 }
 
-function simplifyRoute(wps, epsilon) {
-  // Build index array so we can map back to original waypoints
-  const pts = wps.map((w, i) => [w.lat, w.lon, i]);
-  const simplified = douglasPeucker(pts, epsilon);
-  return simplified.map(p => wps[p[2]]);
+// --- Land-avoidance: clamp smoothed points to original polyline ---
+// For each smoothed point, find the closest point on the original polyline.
+// If distance exceeds maxDev, pull the point back toward the polyline.
+function clampToPolyline(smoothed, original, maxDev) {
+  return smoothed.map(p => {
+    let minD = Infinity, closest = p;
+    for (let j = 0; j < original.length - 1; j++) {
+      const a = original[j], b = original[j + 1];
+      const proj = projectToSegment(p, a, b);
+      const d = Math.sqrt((p[0]-proj[0])**2 + (p[1]-proj[1])**2);
+      if (d < minD) { minD = d; closest = proj; }
+    }
+    if (minD <= maxDev) return p;
+    // Pull back: place point at maxDev distance from polyline, toward original point
+    const ratio = maxDev / minD;
+    return [
+      closest[0] + ratio * (p[0] - closest[0]),
+      closest[1] + ratio * (p[1] - closest[1]),
+    ];
+  });
+}
+
+// Project point p onto line segment a-b, return closest point on segment
+function projectToSegment(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx*dx + dy*dy;
+  if (len2 < 1e-18) return a;
+  const t = Math.max(0, Math.min(1, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / len2));
+  return [a[0] + t*dx, a[1] + t*dy];
+}
+
+// Bearing from point a to point b in degrees [0, 360)
+function bearing(a, b) {
+  const dLon = (b[1] - a[1]) * Math.PI / 180;
+  const lat1 = a[0] * Math.PI / 180;
+  const lat2 = b[0] * Math.PI / 180;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
 function haversineNm(lat1, lon1, lat2, lon2) {

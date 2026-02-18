@@ -86,8 +86,6 @@ struct CostConfig {
 }
 
 enum Algorithm : char {
-    APSP,
-    ENUMERATE,
     DIJKSTRA,
 }
 
@@ -461,97 +459,6 @@ fn void update_all_weights(SwrState* state, WeatherGrid* weather) {
     rebuild_graph(state);
 }
 
-// ============================================================
-// HVM4 Weather-to-Weight Pipeline (Pass 1)
-// ============================================================
-
-fn uint[]? compute_weights_hvm4(SwrState* state, WeatherGrid* weather) {
-    uint e = state.prm.edge_count;
-    if (e == 0) return SWR_ERROR~;
-
-    // Allocate per-edge weather sample arrays
-    double[] wind_speed = mem::new_array(double, e);
-    double[] wind_dir   = mem::new_array(double, e);
-    double[] wave_ht    = mem::new_array(double, e);
-    double[] cur_speed  = mem::new_array(double, e);
-    double[] cur_dir    = mem::new_array(double, e);
-    defer {
-        free(wind_speed.ptr);
-        free(wind_dir.ptr);
-        free(wave_ht.ptr);
-        free(cur_speed.ptr);
-        free(cur_dir.ptr);
-    }
-
-    // Sample weather at each edge midpoint
-    for (uint i = 0; i < e; i++) {
-        uint from = state.prm.edge_from[i];
-        uint to   = state.prm.edge_to[i];
-        LatLon mid = {
-            .lat = (state.prm.waypoints[from].pos.lat + state.prm.waypoints[to].pos.lat) / 2.0,
-            .lon = (state.prm.waypoints[from].pos.lon + state.prm.waypoints[to].pos.lon) / 2.0
-        };
-        WeatherCell w = weather.sample(mid);
-        wind_speed[i] = w.wind_speed;
-        wind_dir[i]   = w.wind_dir;
-        wave_ht[i]    = w.wave_height;
-        cur_speed[i]  = w.current_speed;
-        cur_dir[i]    = w.current_dir;
-    }
-
-    // Register weather FFI
-    pathfind::hvm4_lib_reset();
-    pathfind::hvm4_weather_setup(
-        state.prm.edge_dist_m.ptr, state.prm.edge_heading.ptr,
-        wind_speed.ptr, wind_dir.ptr, wave_ht.ptr,
-        cur_speed.ptr, cur_dir.ptr,
-        state.ship.base_speed, state.ship.max_wave_ht,
-        state.ship.fuel_rate_base, state.ship.fuel_rate_per_kt,
-        (uint)state.cost_cfg.mode, state.cost_cfg.alpha,
-        state.cost_cfg.safety_penalty, state.cost_cfg.scale,
-        e
-    );
-
-    // Generate HVM4 source: balanced binary tree of %edge_cost(i) calls
-    // Uses bifurcation pattern (bend) for parallel work-stealing.
-    // @build(depth, index) forks into two halves at each level;
-    // leaves call %edge_cost(i) via FFI, @cat merges result lists.
-    pathfind::DStr ds = pathfind::new_dstr();
-    defer ds.free();
-
-    // Compute tree depth: ceil(log2(e))
-    uint depth = 0;
-    uint cap = 1;
-    while (cap < e) { depth++; cap *= 2; }
-
-    ds.append_string("@cat = \xce\xbb{[]: \xce\xbbys. ys; <>: \xce\xbbh. \xce\xbbt. \xce\xbbys. h <> @cat(t, ys)}\n");
-    ds.append_string("@build = \xce\xbb{0: \xce\xbb&i. \xce\xbblimit. @build_base(i < limit, i);\n");
-    ds.append_string("            \xce\xbbn. \xce\xbbi. \xce\xbblimit. @build_step(n, i, limit)}\n");
-    ds.append_string("@build_base = \xce\xbb{0: \xce\xbbi. []; \xce\xbbm. \xce\xbbi. [%edge_cost(i)]}\n");
-    ds.append_string("@build_step = \xce\xbb&d. \xce\xbb&i. \xce\xbb&limit. @cat(@build(d - 1, i * 2, limit), @build(d - 1, i * 2 + 1, limit))\n");
-    ds.appendf("@main = @build(%d, 0, %d)\n", depth, e);
-
-    // Run HVM4
-    uint[] out_buf = mem::new_array(uint, e);
-    int count = pathfind::hvm4_run(ds.zstr_view(), 0, out_buf.ptr, (int)e);
-
-    if (count < 0 || (uint)count != e) {
-        free(out_buf.ptr);
-        return pathfind::HVM_ERROR~;
-    }
-
-    return out_buf;
-}
-
-fn void update_weights_hvm4(SwrState* state, WeatherGrid* weather) {
-    uint[] weights = compute_weights_hvm4(state, weather)!!;
-    for (uint i = 0; i < state.prm.edge_count; i++) {
-        state.prm.edge_weight[i] = weights[i];
-    }
-    free(weights.ptr);
-    rebuild_graph(state);
-}
-
 fn void rebuild_graph(SwrState* state) {
     state.prm.graph.destroy();
     state.prm.graph.init(state.prm.n);
@@ -602,53 +509,11 @@ fn uint[] extract_path(SwrState* state, uint[] dist) {
 }
 
 // ============================================================
-// Per-Algorithm Routing Functions
-// ============================================================
-
-fn RouteResult? swr_route_apsp(SwrState* state, WeatherGrid* weather) {
-    update_weights_hvm4(state, weather);
-
-    uint[] mat = pathfind::algebraic_apsp(&state.prm.graph)!;
-    uint n = state.prm.n;
-
-    uint cost = mat[state.origin * n + state.destination];
-
-    return (RouteResult){
-        .path = {},
-        .path_len = 0,
-        .total_cost = cost,
-        .distances = mat,
-        .dist_count = (usz)(n * n)
-    };
-}
-
-fn RouteResult? swr_route_enumerate(SwrState* state, WeatherGrid* weather) {
-    update_weights_hvm4(state, weather);
-
-    pathfind::PathResult pr = pathfind::enumerate_paths(&state.prm.graph, state.origin, state.destination)!;
-
-    uint min_cost = pathfind::INF;
-    for (usz i = 0; i < pr.count; i++) {
-        if (pr.weights[i] < min_cost) min_cost = pr.weights[i];
-    }
-
-    return (RouteResult){
-        .path = {},
-        .path_len = 0,
-        .total_cost = min_cost,
-        .distances = pr.weights,
-        .dist_count = pr.count
-    };
-}
-
-// ============================================================
 // Unified Replan
 // ============================================================
 
 fn RouteResult? swr_replan(SwrState* state, WeatherGrid* weather, Algorithm algo) {
     switch (algo) {
-        case APSP: return swr_route_apsp(state, weather);
-        case ENUMERATE: return swr_route_enumerate(state, weather);
         case DIJKSTRA: return swr_dijkstra::swr_dijkstra(state, weather);
     }
 }

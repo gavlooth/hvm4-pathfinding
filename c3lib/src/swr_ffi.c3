@@ -13,7 +13,6 @@ const int SWR_NULL       = -1;
 const int SWR_BAD_PARAM  = -2;
 const int SWR_ALLOC_FAIL = -3;
 const int SWR_NO_ROUTE   = -4;
-const int SWR_HVM_ERROR  = -5;
 
 // ============================================================
 // Internal Types (opaque to FFI callers)
@@ -93,11 +92,11 @@ fn void ffi_state_free_forecast(FfiState* fs) {
 // ============================================================
 
 fn void swr_init() @export("swr_init") {
-    pathfind::hvm4_lib_init();
+    // No-op: HVM4 runtime removed
 }
 
 fn void swr_cleanup() @export("swr_cleanup") {
-    pathfind::hvm4_lib_cleanup();
+    // No-op: HVM4 runtime removed
 }
 
 // ============================================================
@@ -352,7 +351,7 @@ fn void* swr_route(void* state_handle, int algorithm) @export("swr_route") {
     FfiState* fs = (FfiState*)state_handle;
     if (fs.state.prm.n == 0) return null;
     if (fs.forecast_count == 0) return null;
-    if (algorithm < 0 || algorithm > 5) return null;
+    if (algorithm < 0 || algorithm > 0) return null;
 
     // Use last pushed grid
     uint grid_idx = fs.forecast_count - 1;
