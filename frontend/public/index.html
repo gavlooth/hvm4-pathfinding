@@ -44,6 +44,20 @@
     .timeout-row input { width: 50px; text-align: center; padding: 5px 4px; }
     .timeout-row span { font-size: 12px; color: #666; }
     .elapsed { font-size: 12px; color: #ffb74d; font-family: monospace; min-height: 18px; }
+    .weather-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .weather-grid input { width: 100%; text-align: center; padding: 5px 4px; }
+    .weather-grid .wlabel { font-size: 10px; color: #555; text-align: center; }
+    .reroute-row { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #888; }
+    .reroute-row input[type="checkbox"] { width: auto; cursor: pointer; }
+    .reroute-row input[type="number"] { width: 48px; text-align: center; padding: 4px 2px; }
+    .reroute-row span { white-space: nowrap; }
+    #countdown { color: #ffb74d; font-family: monospace; font-size: 13px; }
+    .comparison { font-size: 12px; line-height: 1.6; margin-top: 6px; padding: 6px 8px; background: #111122; border-radius: 4px; border-left: 3px solid #e94560; }
+    .comparison .calm { color: #4fc3f7; }
+    .comparison .weather { color: #e94560; }
+    .comparison .penalty { color: #ffb74d; }
+    .legend-control { background: rgba(10,10,26,0.85); padding: 8px 10px; border-radius: 5px; font-size: 11px; line-height: 1.8; color: #ccc; }
+    .legend-control i { display: inline-block; width: 20px; height: 3px; vertical-align: middle; margin-right: 5px; }
   </style>
 </head>
 <body>
@@ -66,7 +80,7 @@
         <option value="38.2466,21.7346,39.6243,19.9217">Patras - Corfu</option>
       </select>
       <label>Algorithm</label>
-      <select id="algo" disabled>
+      <select id="algo" disabled onchange="onAlgoChange()">
         <option value="c3_dijkstra" selected>Dijkstra (C3)</option>
         <option value="vine_dijkstra">Dijkstra (Vine)</option>
         <option value="vine_delta_stepping">Delta-Stepping (Vine, parallel)</option>
@@ -80,10 +94,25 @@
         <option value="bezier">Cubic B&eacute;zier spline</option>
         <option value="heading">Heading-rate limiting</option>
       </select>
+      <label>Weather</label>
+      <div class="weather-grid">
+        <div><div class="wlabel">Wind (m/s)</div><input type="number" id="wind-speed" value="0" min="0" max="40" step="0.5"></div>
+        <div><div class="wlabel">Wind dir (&deg;)</div><input type="number" id="wind-dir" value="0" min="0" max="360" step="5"></div>
+        <div><div class="wlabel">Current (m/s)</div><input type="number" id="current-speed" value="0" min="0" max="5" step="0.1"></div>
+        <div><div class="wlabel">Current dir (&deg;)</div><input type="number" id="current-dir" value="0" min="0" max="360" step="5"></div>
+      </div>
       <label>Timeout</label>
       <div class="timeout-row">
         <input type="number" id="timeout" value="30" min="5" max="300" step="5">
         <span>seconds</span>
+      </div>
+      <label>Dynamic routing</label>
+      <div class="reroute-row">
+        <input type="checkbox" id="auto-reroute">
+        <span>Re-route every</span>
+        <input type="number" id="reroute-interval" value="180" min="1" max="720">
+        <span>min</span>
+        <span id="countdown">&mdash;</span>
       </div>
       <div class="elapsed" id="elapsed"></div>
       <div class="btn-row">
@@ -101,6 +130,10 @@ let map, routeLine, markers = [];
 let abortCtrl = null;
 let elapsedTimer = null;
 let bgLine = null;
+let calmLine = null;
+let lastTimestamp = '';
+let countdownTimer = null;
+let countdownEnd = null;
 
 const ALGO_INFO = {
   'c3_dijkstra': { name: 'Dijkstra (C3)', desc: 'Fibonacci heap Dijkstra in C3.' },
@@ -117,6 +150,16 @@ function onSmoothingChange() {
   }
 }
 
+function onAlgoChange() {
+  const alg = document.getElementById('algo').value;
+  const isVine = alg.startsWith('vine_');
+  // Show/hide weather inputs based on algorithm type
+  document.querySelectorAll('.weather-grid input').forEach(el => {
+    el.disabled = !isVine;
+    el.style.opacity = isVine ? '1' : '0.4';
+  });
+}
+
 let lastRoute = null, lastAlg = '', lastMs = 0;
 
 // --- Map setup ---
@@ -125,6 +168,18 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors',
   maxZoom: 18,
 }).addTo(map);
+
+// --- Legend ---
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = function() {
+  const div = L.DomUtil.create('div', 'legend-control');
+  div.innerHTML =
+    '<b>Route Legend</b><br>' +
+    '<i style="background:#e94560"></i> Weather route<br>' +
+    '<i style="background:#4fc3f7;border-top:2px dashed #4fc3f7;height:0"></i> Calm reference';
+  return div;
+};
+legend.addTo(map);
 
 // --- Logging ---
 function log(msg, cls) {
@@ -235,21 +290,33 @@ async function runPipeline() {
     let route;
     if (isVine) {
       const vineAlgo = alg.replace('vine_', '');
-      route = await post('/api/vine/route', { algorithm: vineAlgo, workers: 4, origin, destination: dest }, signal);
+      const wxParams = {
+        wind_speed: parseFloat(document.getElementById('wind-speed').value) || 0,
+        wind_dir: parseFloat(document.getElementById('wind-dir').value) || 0,
+        current_speed: parseFloat(document.getElementById('current-speed').value) || 0,
+        current_dir: parseFloat(document.getElementById('current-dir').value) || 0,
+      };
+      route = await post('/api/vine/route', {
+        algorithm: vineAlgo, workers: 4, origin, destination: dest, ...wxParams
+      }, signal);
     } else {
       route = await post('/api/route', { algorithm: 0 }, signal);
     }
     stopElapsed();
     const ms = (performance.now()-t1)|0;
     document.getElementById('elapsed').textContent = `${(ms/1000).toFixed(1)}s`;
-    const costUnit = route.engine === 'vine' ? 'km' : 'h';
-    log(`Route: cost=${route.cost} (${route.cost_real.toFixed(1)} ${costUnit}), ${route.path_length} wp, ${ms} ms`, 'ok');
+    log(`Route: cost=${route.cost} (${route.cost_real.toFixed(1)} h), ${route.path_length} wp, ${ms} ms`, 'ok');
+    if (route.calm_route) {
+      log(`Calm ref: cost=${route.calm_route.cost} (${route.calm_route.cost_real.toFixed(1)} h), ${route.calm_route.path_length} wp`, 'ok');
+    }
 
     lastRoute = route;
     lastAlg = algName;
     lastMs = ms;
+    if (route.timestamp) lastTimestamp = route.timestamp;
     displayRoute(route);
     updateInfo(route, algName, ms);
+    startCountdown();
 
   } catch (e) {
     stopElapsed();
@@ -269,9 +336,11 @@ async function runPipeline() {
 function displayRoute(route) {
   if (routeLine) map.removeLayer(routeLine);
   if (bgLine) map.removeLayer(bgLine);
+  if (calmLine) map.removeLayer(calmLine);
   markers.forEach(m => map.removeLayer(m));
   markers = [];
   bgLine = null;
+  calmLine = null;
 
   const wps = route.waypoints;
   if (!wps || !wps.length) return;
@@ -281,15 +350,27 @@ function displayRoute(route) {
   const smoothed = smoothRoute(rawLatLngs, method);
   const isSmoothed = method !== 'none';
 
-  // Draw raw route as faint background when smoothing is active
-  if (isSmoothed) {
-    bgLine = L.polyline(rawLatLngs, { color: '#4fc3f7', weight: 1, opacity: 0.25, dashArray: '4,4' }).addTo(map);
+  // Draw calm reference route (dashed light-blue) if available
+  if (route.calm_route && route.calm_route.waypoints && route.calm_route.waypoints.length) {
+    const calmLatLngs = route.calm_route.waypoints.map(w => [w.lat, w.lon]);
+    const calmSmoothed = smoothRoute(calmLatLngs, method);
+    calmLine = L.polyline(calmSmoothed, {
+      color: '#4fc3f7', weight: 2, opacity: 0.5, dashArray: '6,4', smoothFactor: 1,
+    }).addTo(map);
   }
 
-  // Draw smoothed (or raw) route
+  // Draw raw route as faint background when smoothing is active
+  if (isSmoothed) {
+    bgLine = L.polyline(rawLatLngs, { color: '#e94560', weight: 1, opacity: 0.15, dashArray: '3,3' }).addTo(map);
+  }
+
+  // Draw weather (or main) route — solid red
   routeLine = L.polyline(smoothed, { color: '#e94560', weight: 3, opacity: 0.9, smoothFactor: 1 }).addTo(map);
 
-  // Markers always on original waypoints
+  // Timestamp for popups
+  const ts = lastTimestamp ? new Date(lastTimestamp).toLocaleTimeString() : '';
+
+  // Markers on weather route waypoints
   wps.forEach((wp, i) => {
     const isEnd = (i === 0 || i === wps.length - 1);
     const m = L.circleMarker([wp.lat, wp.lon], {
@@ -299,12 +380,13 @@ function displayRoute(route) {
       color: '#fff',
       weight: isEnd ? 2 : 1,
     }).addTo(map);
+    const tsLine = ts ? `<br><span style="color:#888">Updated: ${ts}</span>` : '';
     m.bindPopup(`<b>${i === 0 ? 'Origin' : i === wps.length-1 ? 'Destination' : 'WP ' + i}</b><br>
       Node ${wp.node_id}<br>
       ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}<br>
       ETA: ${wp.eta_hours.toFixed(1)} h | ${wp.speed_knots.toFixed(1)} kt<br>
       Wave: ${wp.wave_height.toFixed(1)} m | Wind: ${wp.wind_speed.toFixed(1)} kt<br>
-      Hdg: ${wp.heading_deg.toFixed(0)}&deg;`);
+      Hdg: ${wp.heading_deg.toFixed(0)}&deg;${tsLine}`);
     markers.push(m);
   });
 
@@ -321,13 +403,33 @@ function updateInfo(route, alg, ms) {
 
   const method = document.getElementById('smoothing').value;
   const smoothLabel = method === 'none' ? '' : ` + ${method}`;
+  const costUnit = 'hours';
 
-  document.getElementById('info').innerHTML =
+  let infoHtml =
     `<b>Algorithm:</b> ${alg} (${ms} ms)<br>` +
-    `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} ${route.engine === 'vine' ? 'km' : 'hours'})<br>` +
+    `<b>Cost:</b> ${route.cost} (${route.cost_real.toFixed(2)} ${costUnit})<br>` +
     `<b>Waypoints:</b> ${wps.length}${smoothLabel}<br>` +
-    `<b>Distance:</b> ~${totalDist.toFixed(1)} nm<br>` +
-    `<b>ETA:</b> ${wps[wps.length-1].eta_hours.toFixed(1)} hours`;
+    `<b>Distance:</b> ~${totalDist.toFixed(1)} nm`;
+
+  // Dual-route comparison
+  if (route.calm_route) {
+    const wxCost = route.cost_real;
+    const calmCost = route.calm_route.cost_real;
+    const penalty = calmCost > 0 ? ((wxCost - calmCost) / calmCost * 100) : 0;
+    const sign = penalty >= 0 ? '+' : '';
+    infoHtml += `<div class="comparison">` +
+      `<span class="weather">Weather Route:</span> ${wxCost.toFixed(1)} h (cost ${route.cost})<br>` +
+      `<span class="calm">Calm Route:</span> ${calmCost.toFixed(1)} h (cost ${route.calm_route.cost})<br>` +
+      `<span class="penalty">Penalty: ${sign}${penalty.toFixed(1)}%` +
+      (penalty !== 0 ? ` (weather ${penalty > 0 ? 'adds' : 'saves'} ${Math.abs(wxCost - calmCost).toFixed(1)} h)` : ' (no difference)') +
+      `</span></div>`;
+  }
+
+  if (lastTimestamp) {
+    infoHtml += `<br><span style="color:#666;font-size:11px">Updated: ${new Date(lastTimestamp).toLocaleString()}</span>`;
+  }
+
+  document.getElementById('info').innerHTML = infoHtml;
 
   let html = '<table><tr><th>#</th><th>Lat</th><th>Lon</th><th>ETA</th><th>Speed</th><th>Wave</th><th>Wind</th><th>Hdg</th><th>Node</th></tr>';
   wps.forEach((wp, i) => {
@@ -568,6 +670,57 @@ function haversineNm(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
   return 2 * R * Math.asin(Math.sqrt(a));
 }
+
+// ============================================================
+// Countdown timer for dynamic re-routing
+// ============================================================
+
+function startCountdown() {
+  stopCountdown();
+  const cb = document.getElementById('auto-reroute');
+  if (!cb.checked) {
+    document.getElementById('countdown').textContent = '\u2014';
+    return;
+  }
+  const minutes = parseInt(document.getElementById('reroute-interval').value) || 180;
+  countdownEnd = Date.now() + minutes * 60 * 1000;
+  tickCountdown();
+  countdownTimer = setInterval(tickCountdown, 1000);
+}
+
+function tickCountdown() {
+  const el = document.getElementById('countdown');
+  const remaining = Math.max(0, countdownEnd - Date.now());
+  if (remaining <= 0) {
+    el.textContent = 'Re-routing...';
+    stopCountdown();
+    runPipeline();
+    return;
+  }
+  const h = Math.floor(remaining / 3600000);
+  const m = Math.floor((remaining % 3600000) / 60000);
+  const s = Math.floor((remaining % 60000) / 1000);
+  el.textContent = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+function stopCountdown() {
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+}
+
+// Initialize weather input state
+onAlgoChange();
+
+document.getElementById('auto-reroute').addEventListener('change', function() {
+  if (!this.checked) {
+    stopCountdown();
+    document.getElementById('countdown').textContent = '\u2014';
+  } else if (lastRoute) {
+    startCountdown();
+  }
+});
 </script>
 </body>
 </html>

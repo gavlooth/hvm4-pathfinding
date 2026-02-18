@@ -16,6 +16,7 @@ using .VineRouting
 using .KwonSpeedLoss
 using HTTP
 using JSON3
+using Dates
 
 # ============================================================
 # Server State
@@ -38,13 +39,17 @@ mutable struct ServerState
     csr_dist_m::Union{Vector{Float64}, Nothing}
     csr_heading::Union{Vector{Float64}, Nothing}
     csr_midpoints::Union{Vector{Tuple{Float64,Float64}}, Nothing}
+    # Calm-weather weights (cached, no weather penalty)
+    csr_weights_calm::Union{Vector{UInt32}, Nothing}
+    last_weather_update::String
 end
 
 const STATE = ServerState(
     nothing, nothing, UInt32(1000), false, nothing, nothing,
     KwonSpeedLoss.ShipParams(),  # default ship
     :time,                       # default: minimize time
-    nothing, nothing, nothing, nothing, nothing, nothing
+    nothing, nothing, nothing, nothing, nothing, nothing,
+    nothing, ""
 )
 
 const GRID_CACHE = joinpath(@__DIR__, "data", "aegean_grid.txt")
@@ -254,6 +259,7 @@ function build_csr_cache!(grid)
 
     # Initial weights: calm weather (distance-based, no weather penalty)
     recompute_csr_weights!()
+    STATE.csr_weights_calm = copy(STATE.csr_weights)
 end
 
 """Bearing from (lat1,lon1) to (lat2,lon2) in degrees (0=N, 90=E)."""
@@ -294,6 +300,21 @@ function recompute_csr_weights!(; wind_speed_ms=0.0, wind_dir_deg=0.0,
     end
     STATE.csr_weights = weights
     @info "CSR weights recomputed: $(n_edges) edges, mode=$(mode)"
+end
+
+"""Convert vine route result path to waypoint dicts."""
+function path_to_waypoints(path, grid, scale)
+    wps = Dict{Symbol, Any}[]
+    for nid in path
+        lat, lon = grid.centers[nid + 1]  # 1-indexed in Julia
+        push!(wps, Dict(
+            :lat => lat, :lon => lon,
+            :eta_hours => 0.0, :speed_knots => 0.0,
+            :wave_height => 0.0, :wind_speed => 0.0,
+            :heading_deg => 0.0, :node_id => UInt32(nid),
+        ))
+    end
+    wps
 end
 
 function handle_vine_route(req)
@@ -337,37 +358,69 @@ function handle_vine_route(req)
     # Map algorithm name to numeric ID: 0=dijkstra, 1=delta_stepping
     algo_id = algo == "delta_stepping" ? 1 : 0
 
+    # Weather parameters (optional — default to calm)
+    wind_speed = Float64(get(body, :wind_speed, 0.0))
+    wind_dir = Float64(get(body, :wind_dir, 0.0))
+    current_speed = Float64(get(body, :current_speed, 0.0))
+    current_dir = Float64(get(body, :current_dir, 0.0))
+    has_weather = wind_speed > 0 || current_speed > 0
+
+    scale = Int(STATE.scale)
+    timestamp = Dates.format(now(UTC), "yyyy-mm-ddTHH:MM:SSZ")
+
+    # --- Calm route (always use cached calm weights) ---
     t0 = time()
-    output = VineRouting.vine_route_graph(
+    calm_output = VineRouting.vine_route_graph(
         STATE.vine,
-        STATE.csr_row_ptr, STATE.csr_col_idx, STATE.csr_weights,
+        STATE.csr_row_ptr, STATE.csr_col_idx, STATE.csr_weights_calm,
         Int(src_node), Int(tgt_node);
         algorithm=algo_id, workers=workers)
-    elapsed = time() - t0
+    calm_elapsed = time() - t0
+    calm_result = VineRouting.parse_route_output(calm_output)
+    calm_wps = path_to_waypoints(calm_result.path, grid, scale)
 
-    result = VineRouting.parse_route_output(output)
-
-    # Convert path node IDs back to lat/lon waypoints
-    scale = Int(STATE.scale)
-    wps = Dict{Symbol, Any}[]
-    for nid in result.path
-        lat, lon = grid.centers[nid + 1]  # 1-indexed in Julia
-        push!(wps, Dict(
-            :lat => lat, :lon => lon,
-            :eta_hours => 0.0, :speed_knots => 0.0,
-            :wave_height => 0.0, :wind_speed => 0.0,
-            :heading_deg => 0.0, :node_id => UInt32(nid),
-        ))
+    # --- Weather route ---
+    if has_weather
+        recompute_csr_weights!(wind_speed_ms=wind_speed, wind_dir_deg=wind_dir,
+                               current_speed_ms=current_speed, current_dir_deg=current_dir)
+        STATE.last_weather_update = timestamp
     end
+    # Use weather weights (or calm weights if no weather — same result)
+    weather_weights = has_weather ? STATE.csr_weights : STATE.csr_weights_calm
+
+    t1 = time()
+    wx_output = VineRouting.vine_route_graph(
+        STATE.vine,
+        STATE.csr_row_ptr, STATE.csr_col_idx, weather_weights,
+        Int(src_node), Int(tgt_node);
+        algorithm=algo_id, workers=workers)
+    wx_elapsed = time() - t1
+    wx_result = VineRouting.parse_route_output(wx_output)
+    wx_wps = path_to_waypoints(wx_result.path, grid, scale)
+
+    total_elapsed = calm_elapsed + wx_elapsed
 
     json_response(Dict(
-        :cost => result.cost,
-        :cost_real => Float64(result.cost) / Float64(scale),
-        :path_length => length(result.path),
-        :waypoints => wps,
-        :elapsed_ms => round(elapsed * 1000, digits=1),
+        :cost => wx_result.cost,
+        :cost_real => Float64(wx_result.cost) / Float64(scale),
+        :path_length => length(wx_result.path),
+        :waypoints => wx_wps,
+        :elapsed_ms => round(total_elapsed * 1000, digits=1),
         :algorithm => algo,
         :engine => "vine",
+        :timestamp => timestamp,
+        :weather => Dict(
+            :wind_speed => wind_speed,
+            :wind_dir => wind_dir,
+            :current_speed => current_speed,
+            :current_dir => current_dir,
+        ),
+        :calm_route => Dict(
+            :cost => calm_result.cost,
+            :cost_real => Float64(calm_result.cost) / Float64(scale),
+            :path_length => length(calm_result.path),
+            :waypoints => calm_wps,
+        ),
     ))
 end
 
