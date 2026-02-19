@@ -58,10 +58,50 @@
     .comparison .penalty { color: #ffb74d; }
     .legend-control { background: rgba(10,10,26,0.85); padding: 8px 10px; border-radius: 5px; font-size: 11px; line-height: 1.8; color: #ccc; }
     .legend-control i { display: inline-block; width: 20px; height: 3px; vertical-align: middle; margin-right: 5px; }
+    /* Ship animation bar */
+    #anim-bar { background: #111122; padding: 8px 24px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid #1a1a2e; }
+    .anim-controls { display: flex; align-items: center; gap: 6px; }
+    .anim-controls button { background: #1a1a2e; border: 1px solid #333; color: #e0e0e0; width: 32px; height: 28px; border-radius: 4px; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; padding: 0; }
+    .anim-controls button:hover { border-color: #4fc3f7; }
+    .anim-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+    .anim-controls select { padding: 4px 8px; border: 1px solid #333; border-radius: 4px; background: #1a1a2e; color: #e0e0e0; font-size: 12px; cursor: pointer; }
+    #anim-scrubber { flex: 1; accent-color: #e94560; height: 4px; cursor: pointer; }
+    #anim-time { font-family: monospace; font-size: 12px; color: #aaa; min-width: 150px; text-align: right; }
+    .anim-bottom { display: flex; align-items: center; gap: 12px; }
+    #anim-data { display: flex; gap: 14px; font-size: 11px; font-family: monospace; color: #888; flex-wrap: wrap; flex: 1; }
+    #anim-data b { color: #aaa; font-weight: normal; }
+    #anim-data .val { color: #4fc3f7; }
+    .ship-icon { background: none !important; border: none !important; }
+    .ship-arrow { width: 24px; height: 24px; transition: transform 0.15s linear; }
+    #btn-reroute-from { background: none; border: 1px solid #555; color: #aaa; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+    #btn-reroute-from:hover:not(:disabled) { border-color: #e94560; color: #e94560; }
+    #btn-reroute-from:disabled { opacity: 0.3; cursor: not-allowed; }
   </style>
 </head>
 <body>
   <div id="map"></div>
+  <div id="anim-bar" style="display:none">
+    <div class="anim-controls">
+      <button onclick="animPlay()" id="btn-aplay" title="Play">&#9654;</button>
+      <button onclick="animPause()" id="btn-apause" title="Pause" style="display:none">&#10074;&#10074;</button>
+      <button onclick="animStop()" id="btn-astop" title="Stop">&#9632;</button>
+      <button onclick="animRestart()" id="btn-arestart" title="Restart">&#9194;</button>
+      <span class="anim-label">Speed</span>
+      <select id="anim-speed" onchange="animSpeedMul=+this.value">
+        <option value="50">50&times;</option>
+        <option value="100" selected>100&times;</option>
+        <option value="500">500&times;</option>
+        <option value="1000">1000&times;</option>
+        <option value="3600">3600&times;</option>
+      </select>
+      <input type="range" id="anim-scrubber" min="0" max="10000" value="0" step="1" oninput="onAnimScrub(+this.value)">
+      <span id="anim-time">0:00 / 0:00</span>
+    </div>
+    <div class="anim-bottom">
+      <div id="anim-data"></div>
+      <button id="btn-reroute-from" onclick="rerouteFromShip()" disabled>&#8635; Re-route from here</button>
+    </div>
+  </div>
   <div id="panel">
     <div id="status">
       <h2>Maritime Router</h2>
@@ -84,8 +124,6 @@
         <option value="c3_dijkstra" selected>Dijkstra (C3)</option>
         <option value="vine_dijkstra">Dijkstra (Vine)</option>
         <option value="vine_delta_stepping">Delta-Stepping (Vine, parallel)</option>
-        <option value="vine_bfs">BFS (Vine)</option>
-        <option value="vine_bellman_ford">Bellman-Ford (Vine)</option>
       </select>
       <label>Smoothing</label>
       <select id="smoothing" onchange="onSmoothingChange()">
@@ -139,8 +177,6 @@ const ALGO_INFO = {
   'c3_dijkstra': { name: 'Dijkstra (C3)', desc: 'Fibonacci heap Dijkstra in C3.' },
   'vine_dijkstra': { name: 'Dijkstra (Vine)', desc: 'Map-based Dijkstra on IVM runtime.' },
   'vine_delta_stepping': { name: 'Delta-Stepping (Vine)', desc: 'Parallel bucket SSSP — atomic dist/prev in Rust, tree-parallel relaxation. 53x faster than Vine Dijkstra.' },
-  'vine_bfs': { name: 'BFS (Vine)', desc: 'Level-synchronous BFS (unweighted) on IVM.' },
-  'vine_bellman_ford': { name: 'Bellman-Ford (Vine)', desc: 'Edge relaxation with early termination on IVM.' },
 };
 
 function onSmoothingChange() {
@@ -233,8 +269,10 @@ function setRunning(running) {
 }
 
 // --- Pipeline ---
-async function runPipeline() {
+async function runPipeline(overrideOrigin) {
   setRunning(true);
+  stopAnimationCleanup();
+  document.getElementById('anim-bar').style.display = 'none';
   document.getElementById('log').innerHTML = '';
   document.getElementById('wp-table').innerHTML = '';
   document.getElementById('elapsed').textContent = '';
@@ -256,7 +294,7 @@ async function runPipeline() {
 
   try {
     const sel = document.getElementById('route-select').value.split(',').map(Number);
-    const origin = [sel[0], sel[1]], dest = [sel[2], sel[3]];
+    const origin = overrideOrigin || [sel[0], sel[1]], dest = [sel[2], sel[3]];
     // 1. Init
     log('Initializing with H3 graph...');
     const t0 = performance.now();
@@ -317,6 +355,7 @@ async function runPipeline() {
     displayRoute(route);
     updateInfo(route, algName, ms);
     startCountdown();
+    initAnimation(route);
 
   } catch (e) {
     stopElapsed();
@@ -721,6 +760,235 @@ document.getElementById('auto-reroute').addEventListener('change', function() {
     startCountdown();
   }
 });
+
+// ============================================================
+// Ship Animation
+// ============================================================
+
+let animState = 'stopped';
+let animTime = 0;
+let animTotalTime = 0;
+let animLastFrame = null;
+let animSpeedMul = 100;
+let animEdges = [];
+let shipMarker = null;
+let animRAF = null;
+let animShipPos = null;
+let traveledLine = null;
+
+const SHIP_SVG = '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><polygon points="12,2 21,22 12,17 3,22" fill="#e94560" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+
+function stopAnimationCleanup() {
+  if (animRAF) { cancelAnimationFrame(animRAF); animRAF = null; }
+  animState = 'stopped';
+  if (shipMarker) { map.removeLayer(shipMarker); shipMarker = null; }
+  if (traveledLine) { map.removeLayer(traveledLine); traveledLine = null; }
+  animShipPos = null;
+}
+
+function initAnimation(route) {
+  stopAnimationCleanup();
+
+  const wps = route.waypoints;
+  if (!wps || wps.length < 2 || !wps[wps.length - 1].eta_hours) {
+    document.getElementById('anim-bar').style.display = 'none';
+    return;
+  }
+
+  // Build edge timeline — each edge has constant speed (Kwon model)
+  animEdges = [];
+  for (let i = 0; i < wps.length - 1; i++) {
+    const dt = wps[i + 1].eta_hours - wps[i].eta_hours;
+    const brg = bearing([wps[i].lat, wps[i].lon], [wps[i + 1].lat, wps[i + 1].lon]);
+    const dist = haversineNm(wps[i].lat, wps[i].lon, wps[i + 1].lat, wps[i + 1].lon);
+    const speed = dt > 0 ? dist / dt : (wps[i].speed_knots || 0);
+    animEdges.push({
+      idx: i,
+      startTime: wps[i].eta_hours,
+      endTime: wps[i + 1].eta_hours,
+      duration: Math.max(dt, 0.0001),
+      startLat: wps[i].lat, startLon: wps[i].lon,
+      endLat: wps[i + 1].lat, endLon: wps[i + 1].lon,
+      speed: speed,
+      bearing: brg,
+      distNm: dist,
+      waveHeight: wps[i].wave_height || 0,
+      windSpeed: wps[i].wind_speed || 0,
+    });
+  }
+  animTotalTime = wps[wps.length - 1].eta_hours;
+  animTime = 0;
+  animState = 'stopped';
+
+  // Ship marker (arrow SVG, rotated by bearing)
+  shipMarker = L.marker([wps[0].lat, wps[0].lon], {
+    icon: L.divIcon({
+      className: 'ship-icon',
+      html: '<div class="ship-arrow">' + SHIP_SVG + '</div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    }),
+    zIndexOffset: 1000,
+  }).addTo(map);
+
+  // Traveled path line (white overlay)
+  traveledLine = L.polyline([], { color: '#fff', weight: 3, opacity: 0.6 }).addTo(map);
+
+  document.getElementById('anim-bar').style.display = '';
+  document.getElementById('anim-scrubber').value = 0;
+  document.getElementById('btn-reroute-from').disabled = true;
+  updateAnimData();
+  updateAnimButtons();
+}
+
+function getPositionAtTime(t) {
+  if (animEdges.length === 0) return null;
+  t = Math.max(0, Math.min(t, animTotalTime));
+  for (const e of animEdges) {
+    if (t <= e.endTime) {
+      const f = Math.max(0, Math.min(1, (t - e.startTime) / e.duration));
+      return {
+        lat: e.startLat + f * (e.endLat - e.startLat),
+        lon: e.startLon + f * (e.endLon - e.startLon),
+        speed: e.speed, bearing: e.bearing, edgeIdx: e.idx, frac: f,
+        distNm: e.distNm, waveHeight: e.waveHeight, windSpeed: e.windSpeed,
+      };
+    }
+  }
+  const last = animEdges[animEdges.length - 1];
+  return { lat: last.endLat, lon: last.endLon, speed: 0, bearing: last.bearing,
+    edgeIdx: last.idx, frac: 1, distNm: 0, waveHeight: last.waveHeight, windSpeed: last.windSpeed };
+}
+
+function animPlay() {
+  if (animEdges.length === 0) return;
+  if (animTime >= animTotalTime) animTime = 0;
+  animState = 'playing';
+  animLastFrame = performance.now();
+  document.getElementById('btn-reroute-from').disabled = true;
+  updateAnimButtons();
+  animTick();
+}
+
+function animPause() {
+  animState = 'paused';
+  if (animRAF) { cancelAnimationFrame(animRAF); animRAF = null; }
+  document.getElementById('btn-reroute-from').disabled = false;
+  updateAnimButtons();
+}
+
+function animStop() {
+  animState = 'stopped';
+  if (animRAF) { cancelAnimationFrame(animRAF); animRAF = null; }
+  animTime = 0;
+  updateShipMarker();
+  updateAnimData();
+  updateAnimButtons();
+  document.getElementById('btn-reroute-from').disabled = true;
+}
+
+function animRestart() {
+  animTime = 0;
+  if (animState === 'playing') {
+    animLastFrame = performance.now();
+  }
+  updateShipMarker();
+  updateAnimData();
+}
+
+function animTick() {
+  if (animState !== 'playing') return;
+  const now = performance.now();
+  const dtSec = (now - animLastFrame) / 1000;
+  animLastFrame = now;
+  // Real seconds → simulation hours: dtSec * speedMul / 3600
+  animTime += (dtSec * animSpeedMul) / 3600;
+  if (animTime >= animTotalTime) {
+    animTime = animTotalTime;
+    animState = 'paused';
+    document.getElementById('btn-reroute-from').disabled = false;
+    updateAnimButtons();
+  }
+  updateShipMarker();
+  updateAnimData();
+  if (animState === 'playing') {
+    animRAF = requestAnimationFrame(animTick);
+  }
+}
+
+function updateShipMarker() {
+  const pos = getPositionAtTime(animTime);
+  if (!pos || !shipMarker) return;
+  animShipPos = pos;
+  shipMarker.setLatLng([pos.lat, pos.lon]);
+  // Rotate arrow to match bearing
+  const el = shipMarker.getElement();
+  if (el) {
+    const arrow = el.querySelector('.ship-arrow');
+    if (arrow) arrow.style.transform = 'rotate(' + pos.bearing + 'deg)';
+  }
+  // Traveled path: start → all completed edge origins → current position
+  if (traveledLine) {
+    const pts = [];
+    for (let i = 0; i <= pos.edgeIdx; i++) {
+      pts.push([animEdges[i].startLat, animEdges[i].startLon]);
+    }
+    pts.push([pos.lat, pos.lon]);
+    traveledLine.setLatLngs(pts);
+  }
+}
+
+function updateAnimData() {
+  const pos = getPositionAtTime(animTime);
+  const scrubber = document.getElementById('anim-scrubber');
+  const timeEl = document.getElementById('anim-time');
+  const dataEl = document.getElementById('anim-data');
+  if (!pos) {
+    timeEl.textContent = '--:-- / --:--';
+    dataEl.innerHTML = '';
+    return;
+  }
+  scrubber.value = animTotalTime > 0 ? Math.round(animTime / animTotalTime * 10000) : 0;
+  const el = formatHM(animTime);
+  const tot = formatHM(animTotalTime);
+  const rem = formatHM(Math.max(0, animTotalTime - animTime));
+  timeEl.textContent = el + ' / ' + tot + '  -' + rem;
+  dataEl.innerHTML =
+    '<span><b>Pos</b> <span class="val">' + pos.lat.toFixed(4) + '\u00b0, ' + pos.lon.toFixed(4) + '\u00b0</span></span>' +
+    '<span><b>Brg</b> <span class="val">' + pos.bearing.toFixed(0) + '\u00b0</span></span>' +
+    '<span><b>Speed</b> <span class="val">' + pos.speed.toFixed(1) + ' kt</span></span>' +
+    '<span><b>Wave</b> <span class="val">' + pos.waveHeight.toFixed(1) + ' m</span></span>' +
+    '<span><b>Wind</b> <span class="val">' + pos.windSpeed.toFixed(1) + ' kt</span></span>' +
+    '<span><b>Leg</b> <span class="val">' + (pos.edgeIdx + 1) + '/' + animEdges.length + '</span></span>';
+}
+
+function formatHM(hours) {
+  if (!isFinite(hours) || hours < 0) return '0:00';
+  const h = Math.floor(hours);
+  const m = Math.floor((hours - h) * 60);
+  return h + ':' + String(m).padStart(2, '0');
+}
+
+function onAnimScrub(val) {
+  if (animState === 'playing') animPause();
+  animTime = (val / 10000) * animTotalTime;
+  updateShipMarker();
+  updateAnimData();
+  document.getElementById('btn-reroute-from').disabled = false;
+}
+
+function updateAnimButtons() {
+  document.getElementById('btn-aplay').style.display = animState === 'playing' ? 'none' : '';
+  document.getElementById('btn-apause').style.display = animState === 'playing' ? '' : 'none';
+}
+
+async function rerouteFromShip() {
+  if (!animShipPos) return;
+  const pos = [animShipPos.lat, animShipPos.lon];
+  stopAnimationCleanup();
+  document.getElementById('anim-bar').style.display = 'none';
+  runPipeline(pos);
+}
 </script>
 </body>
 </html>
