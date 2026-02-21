@@ -302,19 +302,58 @@ function recompute_csr_weights!(; wind_speed_ms=0.0, wind_dir_deg=0.0,
     @info "CSR weights recomputed: $(n_edges) edges, mode=$(mode)"
 end
 
-"""Convert vine route result path to waypoint dicts."""
-function path_to_waypoints(path, grid, scale)
+"""Convert vine route result path to waypoint dicts, enriched with ETA/speed/weather."""
+function path_to_waypoints(path, grid, scale;
+                           wind_speed_ms=0.0, wind_dir_deg=0.0,
+                           current_speed_ms=0.0, current_dir_deg=0.0)
+    ship = STATE.ship
     wps = Dict{Symbol, Any}[]
-    for nid in path
+    eta = 0.0
+    for (k, nid) in enumerate(path)
         lat, lon = grid.centers[nid + 1]  # 1-indexed in Julia
+        hdg = 0.0
+        spd = Float64(ship.V_design)
+        wave_h = 0.0
+
+        if k > 1
+            prev = wps[end]
+            hdg = _bearing_deg(prev[:lat], prev[:lon], lat, lon)
+            # Compute Kwon speed loss for this leg
+            frac_loss = KwonSpeedLoss.kwon_speed_loss(ship, wind_speed_ms, wind_dir_deg, hdg)
+            spd = ship.V_design * (1.0 - frac_loss)
+            # Current contribution
+            ca = deg2rad(current_dir_deg - hdg)
+            spd += current_speed_ms * cos(ca) * 1.94384
+            spd = max(spd, 0.5)
+            # Distance & ETA
+            dist_nm = _haversine_nm(prev[:lat], prev[:lon], lat, lon)
+            eta += dist_nm / spd
+            # Approximate wave height from Beaufort scale (BN^1.5 * 0.15 rough approx)
+            bn = KwonSpeedLoss.wind_to_beaufort(wind_speed_ms)
+            wave_h = bn > 0 ? 0.15 * bn^1.5 : 0.0
+        end
+
         push!(wps, Dict(
             :lat => lat, :lon => lon,
-            :eta_hours => 0.0, :speed_knots => 0.0,
-            :wave_height => 0.0, :wind_speed => 0.0,
-            :heading_deg => 0.0, :node_id => UInt32(nid),
+            :eta_hours => round(eta, digits=3),
+            :speed_knots => round(spd, digits=1),
+            :wave_height => round(wave_h, digits=2),
+            :wind_speed => round(wind_speed_ms * 1.94384, digits=1),  # m/s → knots
+            :wind_dir => round(wind_dir_deg, digits=1),
+            :heading_deg => round(hdg, digits=1),
+            :node_id => UInt32(nid),
         ))
     end
     wps
+end
+
+"""Haversine distance in nautical miles."""
+function _haversine_nm(lat1, lon1, lat2, lon2)
+    R = 3440.065  # Earth radius in nm
+    φ1 = deg2rad(lat1); φ2 = deg2rad(lat2)
+    Δφ = deg2rad(lat2 - lat1); Δλ = deg2rad(lon2 - lon1)
+    a = sin(Δφ/2)^2 + cos(φ1) * cos(φ2) * sin(Δλ/2)^2
+    return 2R * asin(sqrt(a))
 end
 
 function handle_vine_route(req)
@@ -396,7 +435,9 @@ function handle_vine_route(req)
         algorithm=algo_id, workers=workers)
     wx_elapsed = time() - t1
     wx_result = VineRouting.parse_route_output(wx_output)
-    wx_wps = path_to_waypoints(wx_result.path, grid, scale)
+    wx_wps = path_to_waypoints(wx_result.path, grid, scale;
+        wind_speed_ms=wind_speed, wind_dir_deg=wind_dir,
+        current_speed_ms=current_speed, current_dir_deg=current_dir)
 
     total_elapsed = calm_elapsed + wx_elapsed
 
