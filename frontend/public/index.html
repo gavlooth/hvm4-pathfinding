@@ -72,7 +72,7 @@
     #anim-data b { color: #aaa; font-weight: normal; }
     #anim-data .val { color: #4fc3f7; }
     .ship-icon { background: none !important; border: none !important; }
-    .wind-barb-icon { background: none !important; border: none !important; }
+
     .ship-arrow { width: 24px; height: 24px; transition: transform 0.15s linear; }
     #btn-reroute-from { background: none; border: 1px solid #555; color: #aaa; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap; }
     #btn-reroute-from:hover:not(:disabled) { border-color: #e94560; color: #e94560; }
@@ -214,10 +214,11 @@ legend.onAdd = function() {
     '<b>Route Legend</b><br>' +
     '<i style="background:#e94560"></i> Weather route<br>' +
     '<i style="background:#4fc3f7;border-top:2px dashed #4fc3f7;height:0"></i> Calm reference<br>' +
-    '<b style="font-size:10px;letter-spacing:0.3px">Wind barbs / wave height:</b><br>' +
-    '<i style="background:#50c878"></i> &lt;0.5 m smooth<br>' +
-    '<i style="background:#ffc832"></i> 1-2.5 m moderate<br>' +
-    '<i style="background:#e63c3c"></i> &gt;4 m very rough';
+    '<b style="font-size:10px;letter-spacing:0.3px">Wind speed:</b><br>' +
+    '<i style="background:rgb(150,210,255)"></i> 0-5 kt calm<br>' +
+    '<i style="background:rgb(80,200,140)"></i> 10-15 kt moderate<br>' +
+    '<i style="background:rgb(255,200,30)"></i> 25 kt strong<br>' +
+    '<i style="background:rgb(230,50,50)"></i> 40+ kt storm';
   return div;
 };
 legend.addTo(map);
@@ -378,188 +379,134 @@ async function runPipeline(overrideOrigin) {
 }
 
 // ============================================================
-// Weather corridor — standard wind barbs + wave height shading
+// Weather corridor — OWM-style gradient canvas overlay
 // ============================================================
-// Places WMO-standard wind barb markers in a wide corridor around
-// the route.  Barb feathering encodes speed in knots; color encodes
-// wave height (Beaufort-style: green → yellow → orange → red).
-// A translucent corridor polygon shows the affected sea area.
+// Single canvas layer draws a continuous colour-coded band along
+// the route.  Per-segment colour follows the OpenWeatherMap wind
+// speed palette.  Two passes (border + fill) with round lineJoin
+// give clean edges without overlap circles.
 
-let weatherMarkers = [];
-let corridorPoly = null;
+let weatherLayer = null;
 
-// Wave-height → colour (Douglas sea scale inspired)
-function waveColor(h) {
-  if (h < 0.5)  return 'rgba(80,200,120,0.7)';   // smooth
-  if (h < 1.25) return 'rgba(160,210,80,0.7)';    // slight
-  if (h < 2.5)  return 'rgba(255,200,50,0.7)';    // moderate
-  if (h < 4.0)  return 'rgba(255,140,30,0.7)';    // rough
-  return 'rgba(230,60,60,0.7)';                     // very rough
+// OWM wind speed colour stops [knots, r, g, b]
+const OWM_STOPS = [
+  [  0, 150, 210, 255],   // light blue — calm
+  [  5,  80, 190, 230],   // cyan
+  [ 10,  80, 200, 140],   // teal-green
+  [ 15, 130, 210,  60],   // green
+  [ 20, 210, 210,  30],   // yellow-green
+  [ 25, 255, 200,  30],   // gold
+  [ 30, 255, 150,  30],   // orange
+  [ 35, 255,  90,  30],   // dark orange
+  [ 40, 230,  50,  50],   // red
+  [ 50, 180,  30, 120],   // magenta
+  [ 60, 120,  20, 140],   // purple
+];
+
+function owmRGB(kt) {
+  if (kt <= OWM_STOPS[0][0]) return OWM_STOPS[0].slice(1);
+  for (let i = 1; i < OWM_STOPS.length; i++) {
+    if (kt <= OWM_STOPS[i][0]) {
+      const [k0, r0, g0, b0] = OWM_STOPS[i - 1];
+      const [k1, r1, g1, b1] = OWM_STOPS[i];
+      const t = (kt - k0) / (k1 - k0);
+      return [
+        Math.round(r0 + t * (r1 - r0)),
+        Math.round(g0 + t * (g1 - g0)),
+        Math.round(b0 + t * (b1 - b0)),
+      ];
+    }
+  }
+  return OWM_STOPS[OWM_STOPS.length - 1].slice(1);
 }
 
-function waveFill(h) {
-  if (h < 0.5)  return '#50c878';
-  if (h < 1.25) return '#a0d250';
-  if (h < 2.5)  return '#ffc832';
-  if (h < 4.0)  return '#ff8c1e';
-  return '#e63c3c';
-}
+const WeatherCorridor = L.Layer.extend({
+  initialize(wps) { this._wps = wps; },
 
-// ---- WMO wind barb SVG generator ----
-// Returns an SVG string (28×28) for a wind barb at given speed (kt) and
-// meteorological direction (degrees, where wind comes FROM).
-// Barbs: half = 5 kt, full = 10 kt, pennant = 50 kt.
-function windBarbSVG(speedKt, dirDeg, color) {
-  const spd = Math.round(speedKt / 5) * 5;  // round to nearest 5
-  const sz = 36, cx = sz / 2, cy = sz / 2;
-  const staffLen = 14;   // half the icon size
-  const barbLen = 8;
-  const barbGap = 3;
-  const penW = 4;
+  onAdd(map) {
+    this._map = map;
+    this._canvas = L.DomUtil.create('canvas', 'weather-corridor');
+    this._canvas.style.position = 'absolute';
+    this._canvas.style.pointerEvents = 'none';
+    this._canvas.style.zIndex = '350';
+    map.getPanes().overlayPane.appendChild(this._canvas);
+    map.on('moveend zoomend resize', this._redraw, this);
+    this._redraw();
+  },
 
-  // Decompose speed into pennants (50), full barbs (10), half barbs (5)
-  let rem = spd;
-  const pennants = Math.floor(rem / 50); rem %= 50;
-  const fulls    = Math.floor(rem / 10); rem %= 10;
-  const halfs    = Math.floor(rem / 5);
+  onRemove(map) {
+    map.getPanes().overlayPane.removeChild(this._canvas);
+    map.off('moveend zoomend resize', this._redraw, this);
+  },
 
-  // Build barb ticks along the staff, starting from the tip
-  // dir in radians: staff points toward where wind comes from
-  const rad = (dirDeg - 90) * Math.PI / 180;  // SVG: 0° = right
-  const ux = Math.cos(rad), uy = Math.sin(rad);
-  const nx = -uy, ny = ux;  // perpendicular (left)
+  _redraw() {
+    const map = this._map, size = map.getSize();
+    const topLeft = map.containerPointToLayerPoint([0, 0]);
+    L.DomUtil.setPosition(this._canvas, topLeft);
+    this._canvas.width = size.x;
+    this._canvas.height = size.y;
+    const ctx = this._canvas.getContext('2d');
+    ctx.clearRect(0, 0, size.x, size.y);
 
-  // Staff endpoints
-  const tipX = cx + ux * staffLen, tipY = cy + uy * staffLen;
-  const baseX = cx - ux * staffLen, baseY = cy - uy * staffLen;
+    const wps = this._wps;
+    if (!wps || wps.length < 2) return;
 
-  let path = `M${baseX.toFixed(1)},${baseY.toFixed(1)} L${tipX.toFixed(1)},${tipY.toFixed(1)}`;
+    // Convert to screen coordinates + per-point wind
+    const pts = wps.map(w => {
+      const p = map.latLngToContainerPoint([w.lat, w.lon]);
+      return { x: p.x, y: p.y, wind: w.wind_speed || 0 };
+    });
 
-  let pos = 0; // distance from tip along staff
-  // Pennants (filled triangles)
-  for (let p = 0; p < pennants; p++) {
-    const px1 = tipX - ux * pos, py1 = tipY - uy * pos;
-    const px2 = tipX - ux * (pos + penW), py2 = tipY - uy * (pos + penW);
-    const px3 = px1 + nx * barbLen, py3 = py1 + ny * barbLen;
-    path += ` M${px1.toFixed(1)},${py1.toFixed(1)} L${px3.toFixed(1)},${py3.toFixed(1)} L${px2.toFixed(1)},${py2.toFixed(1)} Z`;
-    pos += penW + 1;
-  }
-  if (pennants > 0 && (fulls > 0 || halfs > 0)) pos += 1;
+    // Pass 1: border (wider, darker, more opaque)
+    this._drawPass(ctx, pts, 48, 0.35, 0.55);
+    // Pass 2: fill (narrower, lighter)
+    this._drawPass(ctx, pts, 40, 0.28, 1.0);
+  },
 
-  // Full barbs (long lines)
-  for (let f = 0; f < fulls; f++) {
-    const fx = tipX - ux * pos, fy = tipY - uy * pos;
-    const bx = fx + nx * barbLen, by = fy + ny * barbLen;
-    path += ` M${fx.toFixed(1)},${fy.toFixed(1)} L${bx.toFixed(1)},${by.toFixed(1)}`;
-    pos += barbGap;
-  }
-  // Half barb (short line)
-  if (halfs > 0) {
-    if (fulls === 0 && pennants === 0) pos += barbGap; // offset from tip
-    const hx = tipX - ux * pos, hy = tipY - uy * pos;
-    const bx = hx + nx * barbLen * 0.5, by = hy + ny * barbLen * 0.5;
-    path += ` M${hx.toFixed(1)},${hy.toFixed(1)} L${bx.toFixed(1)},${by.toFixed(1)}`;
-  }
+  _drawPass(ctx, pts, width, alpha, brighten) {
+    ctx.lineWidth = width;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
 
-  // Calm circle (speed < 3 kt)
-  if (spd < 3) {
-    return `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" xmlns="http://www.w3.org/2000/svg">` +
-      `<circle cx="${cx}" cy="${cy}" r="5" fill="none" stroke="${color}" stroke-width="2"/>` +
-      `</svg>`;
-  }
+    // Draw each segment individually so stroke colour can vary,
+    // but use moveTo/lineTo within a single begin/stroke per colour
+    // to avoid gaps.  Group consecutive same-colour segments.
+    let prevColor = '';
+    for (let i = 0; i < pts.length - 1; i++) {
+      const avgWind = (pts[i].wind + pts[i + 1].wind) / 2;
+      const [r, g, b] = owmRGB(avgWind);
+      const br = Math.min(255, Math.round(r * brighten));
+      const bg = Math.min(255, Math.round(g * brighten));
+      const bb = Math.min(255, Math.round(b * brighten));
+      const col = `rgba(${br},${bg},${bb},${alpha})`;
 
-  return `<svg width="${sz}" height="${sz}" viewBox="0 0 ${sz} ${sz}" xmlns="http://www.w3.org/2000/svg">` +
-    `<path d="${path}" fill="${color}" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` +
-    `<circle cx="${baseX.toFixed(1)}" cy="${baseY.toFixed(1)}" r="2.5" fill="${color}"/>` +
-    `</svg>`;
-}
+      if (col !== prevColor) {
+        if (prevColor) ctx.stroke();  // flush previous colour
+        ctx.beginPath();
+        ctx.strokeStyle = col;
+        ctx.moveTo(pts[i].x, pts[i].y);
+        prevColor = col;
+      } else if (i === 0) {
+        ctx.beginPath();
+        ctx.strokeStyle = col;
+        ctx.moveTo(pts[i].x, pts[i].y);
+        prevColor = col;
+      }
+      ctx.lineTo(pts[i + 1].x, pts[i + 1].y);
+    }
+    if (prevColor) ctx.stroke();
+  },
+});
 
-// ---- Build corridor polygon + place barbs ----
 function addWeatherCorridor(wps) {
   removeWeatherCorridor();
   if (!wps || wps.length < 2) return;
-
-  // Corridor half-width in degrees (~20 km ≈ 0.18°)
-  const HALF_W = 0.18;
-  // Spacing along route in nm between barb rows
-  const BARB_SPACING_NM = 10;
-  // Barb icon size in px
-  const BARB_SZ = 36;
-
-  // Corridor: thick fill with contrasting border lines
-  const avgWave = wps.reduce((s, w) => s + (w.wave_height || 0), 0) / wps.length;
-  const corridorLatLngs = wps.map(w => [w.lat, w.lon]);
-  // Outer border (slightly wider than fill, darker)
-  const borderLine = L.polyline(corridorLatLngs, {
-    color: waveFill(avgWave), weight: 48, opacity: 0.35,
-    lineCap: 'round', lineJoin: 'round',
-    interactive: false,
-  }).addTo(map);
-  // Inner fill (lighter)
-  corridorPoly = L.polyline(corridorLatLngs, {
-    color: waveFill(avgWave), weight: 42, opacity: 0.15,
-    lineCap: 'round', lineJoin: 'round',
-    interactive: false,
-  }).addTo(map);
-  weatherMarkers.push(borderLine); // track for cleanup
-
-  // Walk along the route and place wind barbs at regular intervals
-  let accumDist = 0;
-  let nextBarb = BARB_SPACING_NM * 0.5;
-
-  for (let i = 0; i < wps.length - 1; i++) {
-    const a = wps[i], b = wps[i + 1];
-    const segDist = haversineNm(a.lat, a.lon, b.lat, b.lon);
-    const segStart = accumDist;
-    accumDist += segDist;
-
-    while (nextBarb <= accumDist && segDist > 0.01) {
-      const f = (nextBarb - segStart) / segDist;
-      const lat = a.lat + f * (b.lat - a.lat);
-      const lon = a.lon + f * (b.lon - a.lon);
-      const windKt = a.wind_speed + f * (b.wind_speed - a.wind_speed);
-      const waveH  = (a.wave_height || 0) + f * ((b.wave_height || 0) - (a.wave_height || 0));
-      const hdg    = a.heading_deg + f * (b.heading_deg - a.heading_deg);
-
-      // Wind direction: use server-provided wind_dir (meteorological: where FROM)
-      const windDirA = a.wind_dir !== undefined ? a.wind_dir : ((a.heading_deg + 180) % 360);
-      const windDirB = b.wind_dir !== undefined ? b.wind_dir : ((b.heading_deg + 180) % 360);
-      const windDir = windDirA + f * (windDirB - windDirA);
-
-      const col = waveFill(waveH);
-      const svg = windBarbSVG(windKt, windDir, col);
-
-      // Place barbs on both sides of route + on-route
-      const dx = b.lon - a.lon, dy = b.lat - a.lat;
-      const len = Math.sqrt(dx * dx + dy * dy) || 1e-9;
-      const pnx = -dy / len, pny = dx / len;
-
-      for (const off of [-0.7, 0, 0.7]) {
-        const pLat = lat + pnx * HALF_W * off;
-        const pLon = lon + pny * HALF_W * off;
-        // Slight random jitter to look natural
-        const jLat = pLat + (Math.random() - 0.5) * 0.012;
-        const jLon = pLon + (Math.random() - 0.5) * 0.012;
-
-        const icon = L.divIcon({
-          className: 'wind-barb-icon',
-          html: svg,
-          iconSize: [BARB_SZ, BARB_SZ],
-          iconAnchor: [BARB_SZ / 2, BARB_SZ / 2],
-        });
-        const m = L.marker([jLat, jLon], { icon, zIndexOffset: -100 }).addTo(map);
-        m.bindPopup(`Wind: ${windKt.toFixed(0)} kt @ ${windDir.toFixed(0)}&deg;<br>Wave: ${waveH.toFixed(1)} m<br>Hdg: ${hdg.toFixed(0)}&deg;`);
-        weatherMarkers.push(m);
-      }
-      nextBarb += BARB_SPACING_NM;
-    }
-  }
+  weatherLayer = new WeatherCorridor(wps);
+  weatherLayer.addTo(map);
 }
 
 function removeWeatherCorridor() {
-  weatherMarkers.forEach(m => map.removeLayer(m));
-  weatherMarkers = [];
-  if (corridorPoly) { map.removeLayer(corridorPoly); corridorPoly = null; }
+  if (weatherLayer) { map.removeLayer(weatherLayer); weatherLayer = null; }
 }
 
 function displayRoute(route) {
